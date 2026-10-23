@@ -12,8 +12,11 @@ needs no account and no extra app.
 
 ## Install
 
-Download the latest release for your system from the Releases page and install it (Windows:
-run the installer or unzip into `C:\ProgramData\obs-studio\plugins`). Then in OBS:
+Download the latest release for your system from the Releases page. On Windows, unzip it
+and put the `lashline` folder in `C:\ProgramData\obs-studio\plugins` (ProgramData is hidden:
+type the path into File Explorer's address bar), so you have
+`C:\ProgramData\obs-studio\plugins\lashline\bin\64bit\lashline.dll`. Close OBS first when
+updating, since Windows locks the plugin while OBS runs. Then in OBS:
 
 1. Right-click your webcam source → **Filters**.
 2. Click **+** under Effect Filters → **Lashline**.
