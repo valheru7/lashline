@@ -36,11 +36,11 @@ class Look:
     opacity: float = 0.85
     # Thickness as a fraction of the eye's width, at the inner and outer corner.
     inner_thickness: float = 0.015
-    outer_thickness: float = 0.07
+    outer_thickness: float = 0.08
     # How far the wing extends past the outer corner, as a fraction of the eye's width (0 = none).
-    wing_length: float = 0.12
+    wing_length: float = 0.32
     # How far the wing tips up from the lid's line, in degrees.
-    wing_lift_degrees: float = 18.0
+    wing_lift_degrees: float = 22.0
     # Edge softness as a fraction of the eye's width.
     softness: float = 0.012
     lashes: bool = False
@@ -59,19 +59,30 @@ def catmull_rom(points: np.ndarray, samples_per_segment: int = 8) -> np.ndarray:
     return np.array(curve)
 
 
-def liner_polygon(lid: np.ndarray, look: Look) -> np.ndarray:
-    """The outline of the liner band for one eye. `lid` runs from the inner to the outer corner."""
-    curve = catmull_rom(lid)
-    eye_width = np.linalg.norm(lid[-1] - lid[0])
+@dataclass
+class LidCurve:
+    """A smoothed upper lid, from the inner to the outer corner, with directions along it."""
+    points: np.ndarray
+    tangents: np.ndarray  # toward the outer corner
+    normals: np.ndarray  # up, away from the eyeball
+    eye_width: float
 
-    # Normals pointing up, away from the eyeball.
-    tangents = np.gradient(curve, axis=0)
+
+def lid_curve(lid: np.ndarray) -> LidCurve:
+    points = catmull_rom(lid)
+    tangents = np.gradient(points, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
     normals = np.stack([tangents[:, 1], -tangents[:, 0]], axis=1)
     # The upper lid arches above the line between the corners; that's the "up" side.
     arch = lid.mean(axis=0) - (lid[0] + lid[-1]) / 2
     if np.dot(normals[len(normals) // 2], arch) < 0:
         normals = -normals
+    return LidCurve(points, tangents, normals, float(np.linalg.norm(lid[-1] - lid[0])))
+
+
+def liner_polygon(lid: LidCurve, look: Look) -> np.ndarray:
+    """The outline of the liner band for one eye."""
+    curve, tangents, normals, eye_width = lid.points, lid.tangents, lid.normals, lid.eye_width
 
     # Thin at the inner corner, growing toward the outer corner; it eases in so the inner
     # third stays fine.
@@ -94,15 +105,41 @@ def liner_polygon(lid: np.ndarray, look: Look) -> np.ndarray:
     return np.array(outline)
 
 
+LASH_COUNT = 7
+
+
+def lash_polygons(lid: LidCurve) -> list[np.ndarray]:
+    """A few thin, tapered lashes on the outer half of the lid, fanning out toward the corner."""
+    lashes = []
+    for i in range(LASH_COUNT):
+        t = 0.4 + 0.58 * i / (LASH_COUNT - 1)
+        index = round(t * (len(lid.points) - 1))
+        root, up, along = lid.points[index], lid.normals[index], lid.tangents[index]
+        # Lashes near the middle point up; toward the outer corner they sweep outward.
+        sweep = math.radians(15 + 45 * (t - 0.4) / 0.58)
+        direction = up * math.cos(sweep) + along * math.sin(sweep)
+        length = (0.13 + 0.07 * (t - 0.4) / 0.58) * lid.eye_width
+        # A slight curl: the tip bends further outward than the base.
+        curl = up * math.cos(sweep + 0.35) + along * math.sin(sweep + 0.35)
+        middle = root + direction * length * 0.55
+        tip = middle + curl * length * 0.45
+        half_width = 0.012 * lid.eye_width * along
+        lashes.append(np.array([root - half_width, middle - half_width * 0.5, tip, middle + half_width * 0.5, root + half_width]))
+    return lashes
+
+
 def draw_liner(frame: np.ndarray, lids: list[np.ndarray], look: Look) -> np.ndarray:
     height, width = frame.shape[:2]
     supersample = 4
     mask = np.zeros((height * supersample, width * supersample), np.uint8)
     softness_px = 0.0
-    for lid in lids:
-        polygon = liner_polygon(lid, look)
-        cv2.fillPoly(mask, [np.round(polygon * supersample).astype(np.int32)], 255, cv2.LINE_AA)
-        softness_px = max(softness_px, look.softness * np.linalg.norm(lid[-1] - lid[0]))
+    for lid in map(lid_curve, lids):
+        polygons = [liner_polygon(lid, look)]
+        if look.lashes:
+            polygons += lash_polygons(lid)
+        for polygon in polygons:
+            cv2.fillPoly(mask, [np.round(polygon * supersample).astype(np.int32)], 255, cv2.LINE_AA)
+        softness_px = max(softness_px, look.softness * lid.eye_width)
     alpha = cv2.resize(mask, (width, height), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
     if softness_px > 0.3:
         alpha = cv2.GaussianBlur(alpha, (0, 0), softness_px)
