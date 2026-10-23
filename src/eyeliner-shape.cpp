@@ -27,6 +27,19 @@ constexpr float LASH_FADE_START = 0.6f;
 constexpr float LASH_FADE_END = 0.42f;
 constexpr float LINER_FADE_START = 0.55f;
 constexpr float LINER_FADE_END = 0.4f;
+// Points down the middle of the nose, from between the eyes to the tip. When the head turns
+// (especially tipped back), the nose covers the far eye's inner corner first, and the mesh's
+// guesses for a half-hidden eye put liner on the nose. So any part of the liner that lands
+// over the nose is hidden, fading over NOSE_EDGE_SOFTNESS of an eye width, and the far eye's
+// lashes, then liner, fade as the nose closes in on its inner corner. Clearance of the inner corner, in
+// eye widths: about 0.15 for a side glance at the monitor, 0.05 to -0.01 in the bad frames
+// of her test video.
+constexpr std::array<int, 7> NOSE_MIDLINE{168, 6, 197, 195, 5, 4, 1};
+constexpr float LASH_CORNER_FADE_START = 0.12f;
+constexpr float LASH_CORNER_FADE_END = 0.0f;
+constexpr float LINER_CORNER_FADE_START = 0.11f;
+constexpr float LINER_CORNER_FADE_END = 0.03f;
+constexpr float NOSE_EDGE_SOFTNESS = 0.08f;
 
 Point operator+(Point a, Point b)
 {
@@ -241,27 +254,76 @@ float fade(float ratio, float start, float end)
 	return t * t * (3 - 2 * t);
 }
 
+// The middle of the nose as a line down the face, so a point can be checked against the part
+// of the nose at its own height (the nose tip sticks out past the inner corners on any turn,
+// but it's lower down, so it doesn't cover them unless the head is also tipped back).
+// Positions run along the line between the eyes' outer corners, from the person's right eye
+// toward their left: the right eye's liner belongs before the nose, the left eye's after it.
+class NoseLine {
+public:
+	explicit NoseLine(const FaceMesh &face) : across(normalized(face[263] - face[33])), up{across.y, -across.x}
+	{
+		for (size_t i = 0; i < NOSE_MIDLINE.size(); i++)
+			points[i] = {dot(face[NOSE_MIDLINE[i]], across), dot(face[NOSE_MIDLINE[i]], up)};
+	}
+
+	// How far `point` is clear of the nose, toward the given eye's side (negative: over it).
+	// Points above or below the nose are always clear.
+	float clearance(Point point, bool left_eye) const
+	{
+		float position = dot(point, across), height = dot(point, up);
+		float clearance = INFINITY;
+		for (size_t i = 0; i + 1 < points.size(); i++) {
+			Point a = points[i], b = points[i + 1];
+			if (height < std::min(a.y, b.y) || height > std::max(a.y, b.y) || a.y == b.y)
+				continue;
+			float nose = a.x + (b.x - a.x) * (height - a.y) / (b.y - a.y);
+			clearance = std::min(clearance, left_eye ? position - nose : nose - position);
+		}
+		return clearance;
+	}
+
+private:
+	Point across;
+	Point up;
+	std::array<Point, NOSE_MIDLINE.size()> points; // (position across, height) of each midline point
+};
+
 } // namespace
 
 std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 {
 	const std::array<LidCurve, 2> lids{lid_curve(face, RIGHT_UPPER_LID), lid_curve(face, LEFT_UPPER_LID)};
 	const float widest = std::max(lids[0].eye_width, lids[1].eye_width);
+	const NoseLine nose(face);
 
 	std::vector<Vertex> triangles;
 	for (const LidCurve &lid : lids) {
-		float width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
+		const bool left_eye = &lid == &lids[1];
+		const size_t first_vertex = triangles.size();
 		// At least a pixel of fringe, so edges are antialiased even with no softness.
 		float feather = std::max(1.0f, 2 * look.softness * lid.eye_width);
 
-		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END);
+		// Once the nose closes in on this eye's inner corner, its mesh points are guesses; the
+		// lashes, which stick out furthest, go first, then the liner.
+		float width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
+		float corner_clearance = widest > 0 ? nose.clearance(lid.points.front(), left_eye) / widest : 1.0f;
+
+		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END) *
+				      fade(corner_clearance, LINER_CORNER_FADE_START, LINER_CORNER_FADE_END);
 		if (liner_opacity > 0)
 			add_stroke(liner_sections(lid, look), feather, liner_opacity, triangles);
 
-		float lash_opacity = fade(width_ratio, LASH_FADE_START, LASH_FADE_END);
+		float lash_opacity = fade(width_ratio, LASH_FADE_START, LASH_FADE_END) *
+				     fade(corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END);
 		if (look.lashes && lash_opacity > 0)
 			for (const auto &lash : lash_strokes(lid))
 				add_stroke(lash, std::max(1.0f, feather * 0.5f), lash_opacity, triangles);
+
+		// And whatever still lands over the nose is hidden, with a soft edge.
+		float softness = NOSE_EDGE_SOFTNESS * widest;
+		for (size_t i = first_vertex; i < triangles.size(); i++)
+			triangles[i].alpha *= fade(nose.clearance(triangles[i].position, left_eye), softness, 0.0f);
 	}
 	return triangles;
 }

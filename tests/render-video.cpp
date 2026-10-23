@@ -1,7 +1,7 @@
 // Draws the eyeliner onto raw RGBA frames from stdin and writes them to stdout, with a small
 // software rasterizer standing in for OBS's GPU drawing. Lets the shape be checked without OBS:
 //
-//   ffmpeg -i clip.mp4 -f rawvideo -pix_fmt rgba - | render-video W H ORT_LIBRARY MODELS_DIR [lashes] |
+//   ffmpeg -i clip.mp4 -f rawvideo -pix_fmt rgba - | render-video W H ORT_LIBRARY MODELS_DIR [lashes [R,G,B]] |
 //     ffmpeg -f rawvideo -pix_fmt rgba -s WxH -r 60 -i - out.mp4
 
 #include "eyeliner-shape.hpp"
@@ -15,7 +15,7 @@ using namespace eyeliner;
 
 namespace {
 
-constexpr float COLOR[3] = {20, 16, 18}; // soft black, RGB
+float COLOR[3] = {20, 16, 18}; // soft black, RGB; a 6th argument "R,G,B" changes it
 constexpr float OPACITY = 0.85f;
 
 // Blends one triangle over the image, interpolating alpha across it like the GPU does.
@@ -69,6 +69,8 @@ int main(int argc, char **argv)
 	FaceTracker tracker(models + "/face_detector.onnx", models + "/face_landmarks_detector.onnx");
 	Look look;
 	look.lashes = argc > 5 && std::strcmp(argv[5], "lashes") == 0;
+	if (argc > 6)
+		std::sscanf(argv[6], "%f,%f,%f", &COLOR[0], &COLOR[1], &COLOR[2]);
 
 	std::vector<uint8_t> frame(size_t(width) * height * 4);
 	while (std::fread(frame.data(), 1, frame.size(), stdin) == frame.size()) {
