@@ -19,7 +19,7 @@ video = cv2.VideoCapture(sys.argv[1])
 fps = video.get(cv2.CAP_PROP_FPS)
 reference = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
     base_options=BaseOptions(model_asset_path=MODEL), running_mode=vision.RunningMode.VIDEO, num_faces=1))
-ours = FaceTracker("../models")
+ours = FaceTracker("../data/models")
 errors, missing, index = [], 0, 0
 while True:
     ok, frame = video.read()

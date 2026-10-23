@@ -1,7 +1,19 @@
+# Builds and downloaded dependencies
+/build*/
+/release/
+/.deps/
+/third_party/
+*.lock.json
+/cmake/.CMakeBuildNumber
+
 # Test clips of real faces stay local
-testdata/
-prototype/models/
+/testdata/
+
+# Prototype
+/prototype/models/
 .venv/
 __pycache__/
 *.mp4
 *.png
+
+.DS_Store

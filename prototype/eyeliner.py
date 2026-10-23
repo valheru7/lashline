@@ -43,7 +43,7 @@ class Look:
     wing_lift_degrees: float = 22.0
     # Edge softness as a fraction of the eye's width.
     softness: float = 0.012
-    lashes: bool = False
+    lashes: bool = True
 
 
 def catmull_rom(points: np.ndarray, samples_per_segment: int = 8) -> np.ndarray:
