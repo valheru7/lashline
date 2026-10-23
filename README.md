@@ -2,10 +2,13 @@
 
 Eyeliner for OBS Studio.
 
+![Before and after Lashline](docs/before-after.jpg)
 
 A filter that draws a little winged eyeliner, with optional lashes, on your webcam, live in
 OBS Studio. It tracks your face so the liner stays on your lash line as you move, blink and
 turn your head.
+
+![The liner staying on through head turns, blinks and smiles](docs/head-turns.gif)
 
 It's a replacement for Snap Camera's eyeliner lens. It runs entirely on your computer, and
 needs no account and no extra app.
