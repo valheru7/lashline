@@ -1,0 +1,7 @@
+# Test clips of real faces stay local
+testdata/
+prototype/models/
+.venv/
+__pycache__/
+*.mp4
+*.png
