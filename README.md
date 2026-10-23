@@ -15,15 +15,49 @@ needs no account and no extra app.
 
 ## Install
 
-Download the latest release for your system from the Releases page. On Windows, unzip it
-and put the `lashline` folder in `C:\ProgramData\obs-studio\plugins` (ProgramData is hidden:
-type the path into File Explorer's address bar), so you have
-`C:\ProgramData\obs-studio\plugins\lashline\bin\64bit\lashline.dll`. Close OBS first when
-updating, since Windows locks the plugin while OBS runs. Then in OBS:
+You need **OBS Studio 31 or newer**. Download the file for your system from the
+[Releases page](https://github.com/valheru7/lashline/releases), then follow the steps for your
+system. Close OBS before installing or updating, since a running OBS keeps the old copy loaded.
 
-1. Right-click your webcam source → **Filters**.
-2. Click **+** under Effect Filters → **Lashline**.
-3. Put it **above** any Chroma Key filter.
+So far Lashline has been tested on Windows. The macOS and Linux builds are made the same way
+but haven't been tried in OBS yet; reports are welcome.
+
+### Windows
+
+1. Download `lashline-<version>-windows-x64.zip` and unzip it. Inside is a folder called
+   `lashline`.
+2. Open `C:\ProgramData\obs-studio\plugins`. ProgramData is a hidden folder, so the easiest
+   way is to paste that path into File Explorer's address bar. If `obs-studio` or `plugins`
+   doesn't exist yet, create it.
+3. Move the `lashline` folder in there. You should end up with
+   `C:\ProgramData\obs-studio\plugins\lashline\bin\64bit\lashline.dll`.
+
+### macOS (Apple silicon)
+
+1. Download `lashline-<version>-macos-universal.pkg`. Despite the name, it runs on Apple
+   silicon Macs (M1 and later) only.
+2. Open it. macOS will refuse at first, because the installer isn't signed by an Apple
+   developer account. Click **Done**, then go to **System Settings → Privacy & Security**,
+   scroll down, and click **Open Anyway** next to the message about Lashline.
+3. Follow the installer. It puts the plugin in
+   `/Library/Application Support/obs-studio/plugins`.
+
+### Linux (Ubuntu 24.04 and similar)
+
+1. Download `lashline-<version>-x86_64-linux-gnu.deb`.
+2. Install it with `sudo apt install ./lashline-<version>-x86_64-linux-gnu.deb`.
+
+This works with OBS installed from your distribution or the OBS PPA. It doesn't work with the
+Flatpak version of OBS.
+
+### Add it to your camera
+
+1. Start OBS, right-click your webcam source and choose **Filters**.
+2. Under **Effect Filters**, click **+** and choose **Lashline**.
+3. If you use a Chroma Key, put Lashline **above** it.
+
+If Lashline isn't in the list, OBS didn't load it. Open **Help → Log Files → Show Log Files**
+and look for lines mentioning lashline.
 
 ## Settings
 
