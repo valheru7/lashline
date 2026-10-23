@@ -1,5 +1,5 @@
 [project]
-name = "obs-eyeliner-prototype"
+name = "lashline-prototype"
 version = "0.1.0"
 description = "Prototype of the eyeliner look, run on video files"
 readme = "README.md"

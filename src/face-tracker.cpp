@@ -140,7 +140,7 @@ Ort::Value tensor_for(std::vector<float> &data, int size)
 } // namespace
 
 FaceTracker::FaceTracker(const std::string &detector_model_path, const std::string &landmark_model_path)
-	: env(ORT_LOGGING_LEVEL_WARNING, "eyeliner")
+	: env(ORT_LOGGING_LEVEL_WARNING, "lashline")
 {
 	detector = open_session(env, detector_model_path);
 	landmarker = open_session(env, landmark_model_path);

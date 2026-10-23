@@ -1,4 +1,7 @@
-# Eyeliner for OBS
+# Lashline
+
+Eyeliner for OBS Studio.
+
 
 A filter that draws a little winged eyeliner, with optional lashes, on your webcam, live in
 OBS Studio. It tracks your face so the liner stays on your lash line as you move, blink and
@@ -13,7 +16,7 @@ Download the latest release for your system from the Releases page and install i
 run the installer or unzip into `C:\ProgramData\obs-studio\plugins`). Then in OBS:
 
 1. Right-click your webcam source → **Filters**.
-2. Click **+** under Effect Filters → **Eyeliner**.
+2. Click **+** under Effect Filters → **Lashline**.
 3. Put it **above** any Chroma Key filter.
 
 ## Settings

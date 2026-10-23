@@ -335,7 +335,7 @@ private:
 
 const char *filter_name(void *)
 {
-	return obs_module_text("Eyeliner");
+	return obs_module_text("Lashline");
 }
 
 void *filter_create(obs_data_t *settings, obs_source_t *context)
@@ -385,7 +385,7 @@ obs_properties_t *filter_properties(void *)
 obs_source_info make_filter_info()
 {
 	obs_source_info info = {};
-	info.id = "eyeliner_filter";
+	info.id = "lashline_filter";
 	info.type = OBS_SOURCE_TYPE_FILTER;
 	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
 	info.get_name = filter_name;

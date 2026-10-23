@@ -33,13 +33,13 @@
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "io.github.valheru7.obs-eyeliner"
+            "bundleId": "io.github.valheru7.lashline"
         }
     },
-    "name": "obs-eyeliner",
-    "displayName": "Eyeliner for OBS",
+    "name": "lashline",
+    "displayName": "Lashline",
     "version": "0.1.0",
     "author": "Jerica Wilson",
-    "website": "https://github.com/valheru7/obs-eyeliner",
+    "website": "https://github.com/valheru7/lashline",
     "email": ""
 }

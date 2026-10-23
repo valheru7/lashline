@@ -1,5 +1,5 @@
 /*
-Eyeliner for OBS
+Lashline: eyeliner for OBS
 Copyright (C) 2026 Jerica Wilson
 
 This program is free software; you can redistribute it and/or modify
