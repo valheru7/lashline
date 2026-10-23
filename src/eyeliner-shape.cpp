@@ -19,6 +19,14 @@ constexpr int LASH_COUNT = 7;
 // The liner starts a hair below the lid's edge so no skin shows between it and the lashes.
 constexpr float BELOW_LASH_LINE = 0.008f;
 constexpr float PI = 3.14159265f;
+// When the head turns, the far eye looks narrower than the near one, and once it's partly
+// behind the nose its mesh points are guesses: lashes drawn there land on the nose. So the
+// far eye's lashes fade out as its width drops from FADE_START to FADE_END of the near eye's,
+// and its liner (which hugs the lid more tightly) fades a little later.
+constexpr float LASH_FADE_START = 0.6f;
+constexpr float LASH_FADE_END = 0.42f;
+constexpr float LINER_FADE_START = 0.55f;
+constexpr float LINER_FADE_END = 0.4f;
 
 Point operator+(Point a, Point b)
 {
@@ -121,9 +129,9 @@ struct Section {
 	Point high; // the far side
 };
 
-// Adds a stroke as triangles: a solid core between consecutive sections, plus a fringe that
-// fades from opaque at the edge to transparent `feather` pixels further out, all the way round.
-void add_stroke(const std::vector<Section> &sections, float feather, std::vector<Vertex> &out)
+// Adds a stroke as triangles: a core of `opacity` between consecutive sections, plus a fringe
+// that fades from the edge to transparent `feather` pixels further out, all the way round.
+void add_stroke(const std::vector<Section> &sections, float feather, float opacity, std::vector<Vertex> &out)
 {
 	auto triangle = [&](Vertex a, Vertex b, Vertex c) {
 		out.push_back(a);
@@ -150,8 +158,8 @@ void add_stroke(const std::vector<Section> &sections, float feather, std::vector
 	}
 
 	for (size_t i = 0; i + 1 < count; i++) {
-		Vertex low_a{sections[i].low, 1}, high_a{sections[i].high, 1};
-		Vertex low_b{sections[i + 1].low, 1}, high_b{sections[i + 1].high, 1};
+		Vertex low_a{sections[i].low, opacity}, high_a{sections[i].high, opacity};
+		Vertex low_b{sections[i + 1].low, opacity}, high_b{sections[i + 1].high, opacity};
 		Vertex fringe_low_a{sections[i].low - across[i] * feather, 0};
 		Vertex fringe_low_b{sections[i + 1].low - across[i + 1] * feather, 0};
 		Vertex fringe_high_a{sections[i].high + across[i] * feather, 0};
@@ -165,10 +173,10 @@ void add_stroke(const std::vector<Section> &sections, float feather, std::vector
 	for (auto [index, outward] : {std::pair{size_t(0), along[0] * -1}, std::pair{count - 1, along[count - 1]}}) {
 		const Section &end = sections[index];
 		Point fringe_low = end.low - across[index] * feather, fringe_high = end.high + across[index] * feather;
-		quad({end.low, 1}, {end.high, 1}, {fringe_high + outward * feather, 0},
+		quad({end.low, opacity}, {end.high, opacity}, {fringe_high + outward * feather, 0},
 		     {fringe_low + outward * feather, 0});
-		triangle({end.low, 1}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
-		triangle({end.high, 1}, {fringe_high, 0}, {fringe_high + outward * feather, 0});
+		triangle({end.low, opacity}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
+		triangle({end.high, opacity}, {fringe_high, 0}, {fringe_high + outward * feather, 0});
 	}
 }
 
@@ -226,19 +234,34 @@ std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid)
 	return lashes;
 }
 
+// 1 while `ratio` is at or above `start`, falling smoothly to 0 at `end`.
+float fade(float ratio, float start, float end)
+{
+	float t = std::clamp((ratio - end) / (start - end), 0.0f, 1.0f);
+	return t * t * (3 - 2 * t);
+}
+
 } // namespace
 
 std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 {
+	const std::array<LidCurve, 2> lids{lid_curve(face, RIGHT_UPPER_LID), lid_curve(face, LEFT_UPPER_LID)};
+	const float widest = std::max(lids[0].eye_width, lids[1].eye_width);
+
 	std::vector<Vertex> triangles;
-	for (const auto &indices : {RIGHT_UPPER_LID, LEFT_UPPER_LID}) {
-		LidCurve lid = lid_curve(face, indices);
+	for (const LidCurve &lid : lids) {
+		float width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
 		// At least a pixel of fringe, so edges are antialiased even with no softness.
 		float feather = std::max(1.0f, 2 * look.softness * lid.eye_width);
-		add_stroke(liner_sections(lid, look), feather, triangles);
-		if (look.lashes)
+
+		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END);
+		if (liner_opacity > 0)
+			add_stroke(liner_sections(lid, look), feather, liner_opacity, triangles);
+
+		float lash_opacity = fade(width_ratio, LASH_FADE_START, LASH_FADE_END);
+		if (look.lashes && lash_opacity > 0)
 			for (const auto &lash : lash_strokes(lid))
-				add_stroke(lash, std::max(1.0f, feather * 0.5f), triangles);
+				add_stroke(lash, std::max(1.0f, feather * 0.5f), lash_opacity, triangles);
 	}
 	return triangles;
 }
