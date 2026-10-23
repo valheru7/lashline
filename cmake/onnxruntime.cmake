@@ -31,11 +31,7 @@ set(ONNXRUNTIME_DIR "${CMAKE_BINARY_DIR}/deps/${_ort_package}")
 
 if(NOT EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_cxx_api.h")
   message(STATUS "Downloading ONNX Runtime ${ONNXRUNTIME_VERSION}")
-  file(
-    DOWNLOAD "${_ort_base_url}/${_ort_archive}" "${_ort_download}"
-    EXPECTED_HASH SHA256=${_ort_sha256}
-    SHOW_PROGRESS
-  )
+  file(DOWNLOAD "${_ort_base_url}/${_ort_archive}" "${_ort_download}" EXPECTED_HASH SHA256=${_ort_sha256} SHOW_PROGRESS)
   file(ARCHIVE_EXTRACT INPUT "${_ort_download}" DESTINATION "${CMAKE_BINARY_DIR}/deps")
   file(REMOVE "${_ort_download}")
 endif()
@@ -64,8 +60,11 @@ function(target_add_onnxruntime target)
       add_custom_command(
         TARGET ${target}
         POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/onnxruntime"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${library_path}" "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/onnxruntime"
+        COMMAND
+          "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/onnxruntime"
+        COMMAND
+          "${CMAKE_COMMAND}" -E copy_if_different "${library_path}"
+          "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${target}/onnxruntime"
         VERBATIM
       )
     endif()

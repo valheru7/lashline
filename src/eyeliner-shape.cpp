@@ -20,12 +20,30 @@ constexpr int LASH_COUNT = 7;
 constexpr float BELOW_LASH_LINE = 0.008f;
 constexpr float PI = 3.14159265f;
 
-Point operator+(Point a, Point b) { return {a.x + b.x, a.y + b.y}; }
-Point operator-(Point a, Point b) { return {a.x - b.x, a.y - b.y}; }
-Point operator*(Point a, float s) { return {a.x * s, a.y * s}; }
-float dot(Point a, Point b) { return a.x * b.x + a.y * b.y; }
-float length(Point a) { return std::sqrt(dot(a, a)); }
-Point lerp(Point a, Point b, float t) { return a + (b - a) * t; }
+Point operator+(Point a, Point b)
+{
+	return {a.x + b.x, a.y + b.y};
+}
+Point operator-(Point a, Point b)
+{
+	return {a.x - b.x, a.y - b.y};
+}
+Point operator*(Point a, float s)
+{
+	return {a.x * s, a.y * s};
+}
+float dot(Point a, Point b)
+{
+	return a.x * b.x + a.y * b.y;
+}
+float length(Point a)
+{
+	return std::sqrt(dot(a, a));
+}
+Point lerp(Point a, Point b, float t)
+{
+	return a + (b - a) * t;
+}
 
 Point normalized(Point a)
 {
@@ -121,12 +139,14 @@ void add_stroke(const std::vector<Section> &sections, float feather, std::vector
 	std::vector<Point> along(count), across(count);
 	for (size_t i = 0; i < count; i++) {
 		Point before = lerp(sections[i == 0 ? 0 : i - 1].low, sections[i == 0 ? 0 : i - 1].high, 0.5f);
-		Point after = lerp(sections[i + 1 == count ? i : i + 1].low, sections[i + 1 == count ? i : i + 1].high, 0.5f);
+		Point after =
+			lerp(sections[i + 1 == count ? i : i + 1].low, sections[i + 1 == count ? i : i + 1].high, 0.5f);
 		along[i] = normalized(after - before);
 		Point width = sections[i].high - sections[i].low;
 		// Where the stroke tapers to a point, fall back to the direction across it.
 		Point side{-along[i].y, along[i].x};
-		across[i] = length(width) > 1e-3f ? normalized(width) : (dot(side, across[i == 0 ? 0 : i - 1]) < 0 ? side * -1 : side);
+		across[i] = length(width) > 1e-3f ? normalized(width)
+						  : (dot(side, across[i == 0 ? 0 : i - 1]) < 0 ? side * -1 : side);
 	}
 
 	for (size_t i = 0; i + 1 < count; i++) {
@@ -145,7 +165,8 @@ void add_stroke(const std::vector<Section> &sections, float feather, std::vector
 	for (auto [index, outward] : {std::pair{size_t(0), along[0] * -1}, std::pair{count - 1, along[count - 1]}}) {
 		const Section &end = sections[index];
 		Point fringe_low = end.low - across[index] * feather, fringe_high = end.high + across[index] * feather;
-		quad({end.low, 1}, {end.high, 1}, {fringe_high + outward * feather, 0}, {fringe_low + outward * feather, 0});
+		quad({end.low, 1}, {end.high, 1}, {fringe_high + outward * feather, 0},
+		     {fringe_low + outward * feather, 0});
 		triangle({end.low, 1}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
 		triangle({end.high, 1}, {fringe_high, 0}, {fringe_high + outward * feather, 0});
 	}
@@ -159,7 +180,8 @@ std::vector<Section> liner_sections(const LidCurve &lid, const Look &look)
 		// Thin at the inner corner, growing toward the outer corner; it eases in so the inner
 		// third stays fine.
 		float t = float(i) / (count - 1);
-		float thickness = look.inner_thickness + (look.outer_thickness - look.inner_thickness) * std::pow(t, 1.6f);
+		float thickness =
+			look.inner_thickness + (look.outer_thickness - look.inner_thickness) * std::pow(t, 1.6f);
 		sections.push_back({lid.points[i] - lid.normals[i] * (BELOW_LASH_LINE * lid.eye_width),
 				    lid.points[i] + lid.normals[i] * (thickness * lid.eye_width)});
 	}

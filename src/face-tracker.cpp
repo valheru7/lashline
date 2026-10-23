@@ -59,7 +59,8 @@ std::vector<Point> detector_anchors()
 // Fills `tensor` (size x size x 3, channels last) by sampling `image` at
 // `to_image(output pixel)`, bilinearly, with black outside the image. Each channel is mapped
 // from 0..255 to `low`..`high`. Matches OpenCV's warpAffine with INTER_LINEAR.
-void sample_into(const ImageView &image, const Affine &to_image, int size, float low, float high, std::vector<float> &tensor)
+void sample_into(const ImageView &image, const Affine &to_image, int size, float low, float high,
+		 std::vector<float> &tensor)
 {
 	tensor.resize(size_t(size) * size * 3);
 	float scale = (high - low) / 255.0f;
@@ -115,7 +116,8 @@ Affine region_to_image(const Region &region, int crop_size)
 	float scale = region.size / crop_size;
 	float cos = std::cos(region.rotation) * scale, sin = std::sin(region.rotation) * scale;
 	float half = crop_size / 2.0f;
-	return {cos, -sin, region.center.x - cos * half + sin * half, sin, cos, region.center.y - sin * half - cos * half};
+	return {cos, -sin, region.center.x - cos * half + sin * half,
+		sin, cos,  region.center.y - sin * half - cos * half};
 }
 
 Ort::Session open_session(Ort::Env &env, const std::string &path)

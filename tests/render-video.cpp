@@ -19,7 +19,8 @@ constexpr float COLOR[3] = {20, 16, 18}; // soft black, RGB
 constexpr float OPACITY = 0.85f;
 
 // Blends one triangle over the image, interpolating alpha across it like the GPU does.
-void fill_triangle(std::vector<uint8_t> &image, int width, int height, const Vertex &a, const Vertex &b, const Vertex &c)
+void fill_triangle(std::vector<uint8_t> &image, int width, int height, const Vertex &a, const Vertex &b,
+		   const Vertex &c)
 {
 	float area = (b.position.x - a.position.x) * (c.position.y - a.position.y) -
 		     (c.position.x - a.position.x) * (b.position.y - a.position.y);
@@ -32,15 +33,20 @@ void fill_triangle(std::vector<uint8_t> &image, int width, int height, const Ver
 	for (int y = y0; y <= y1; y++) {
 		for (int x = x0; x <= x1; x++) {
 			float px = x + 0.5f, py = y + 0.5f;
-			float wa = ((b.position.x - px) * (c.position.y - py) - (c.position.x - px) * (b.position.y - py)) / area;
-			float wb = ((c.position.x - px) * (a.position.y - py) - (a.position.x - px) * (c.position.y - py)) / area;
+			float wa = ((b.position.x - px) * (c.position.y - py) -
+				    (c.position.x - px) * (b.position.y - py)) /
+				   area;
+			float wb = ((c.position.x - px) * (a.position.y - py) -
+				    (a.position.x - px) * (c.position.y - py)) /
+				   area;
 			float wc = 1 - wa - wb;
 			if (wa < 0 || wb < 0 || wc < 0)
 				continue;
 			float alpha = (wa * a.alpha + wb * b.alpha + wc * c.alpha) * OPACITY;
 			uint8_t *pixel = &image[(size_t(y) * width + x) * 4];
 			for (int channel = 0; channel < 3; channel++)
-				pixel[channel] = uint8_t(std::lround(pixel[channel] * (1 - alpha) + COLOR[channel] * alpha));
+				pixel[channel] =
+					uint8_t(std::lround(pixel[channel] * (1 - alpha) + COLOR[channel] * alpha));
 		}
 	}
 }

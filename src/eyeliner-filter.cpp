@@ -66,7 +66,8 @@ public:
 			std::lock_guard lock(mutex);
 			pending.resize(size_t(width) * height * 4);
 			for (uint32_t row = 0; row < height; row++)
-				std::copy_n(pixels + size_t(row) * linesize, width * 4, &pending[size_t(row) * width * 4]);
+				std::copy_n(pixels + size_t(row) * linesize, width * 4,
+					    &pending[size_t(row) * width * 4]);
 			pending_width = width;
 			pending_height = height;
 			has_pending = true;
@@ -168,8 +169,8 @@ Settings read_settings(obs_data_t *data)
 	// OBS stores colors as 0xAABBGGRR.
 	uint32_t color = uint32_t(obs_data_get_int(data, SETTING_COLOR));
 	float opacity = float(obs_data_get_int(data, SETTING_OPACITY)) / 100;
-	vec4_set(&settings.color, (color & 0xff) / 255.0f, ((color >> 8) & 0xff) / 255.0f, ((color >> 16) & 0xff) / 255.0f,
-		 opacity);
+	vec4_set(&settings.color, (color & 0xff) / 255.0f, ((color >> 8) & 0xff) / 255.0f,
+		 ((color >> 16) & 0xff) / 255.0f, opacity);
 	return settings;
 }
 
@@ -280,7 +281,8 @@ private:
 			uint8_t *pixels;
 			uint32_t linesize;
 			if (gs_stagesurface_map(stage, &pixels, &linesize)) {
-				tracker.submit(pixels, linesize, gs_stagesurface_get_width(stage), gs_stagesurface_get_height(stage));
+				tracker.submit(pixels, linesize, gs_stagesurface_get_width(stage),
+					       gs_stagesurface_get_height(stage));
 				gs_stagesurface_unmap(stage);
 			}
 			stage_pending = false;

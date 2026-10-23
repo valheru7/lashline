@@ -54,7 +54,8 @@ std::string load_onnx_runtime(const std::string &library_path)
 
 	const OrtApi *api = get_api_base()->GetApi(ORT_API_VERSION);
 	if (!api)
-		return std::string("The ONNX Runtime library is older than this plugin expects (it doesn't support API version ") +
+		return std::string(
+			       "The ONNX Runtime library is older than this plugin expects (it doesn't support API version ") +
 		       std::to_string(ORT_API_VERSION) + ")";
 
 	Ort::InitApi(api);
