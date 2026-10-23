@@ -1,5 +1,6 @@
 # Builds and downloaded dependencies
-/build*/
+/build_*/
+/build-tests/
 /release/
 /.deps/
 /third_party/
