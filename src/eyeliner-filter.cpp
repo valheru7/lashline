@@ -1,10 +1,17 @@
-// The OBS filter. Each frame it:
-//   1. draws the source as usual,
-//   2. draws the eyeliner over it, from the newest face the tracker has found, and
-//   3. hands a downscaled copy of the frame to the tracker thread.
-// The copy goes through a staging surface, which is read back one frame later so the GPU is
-// never waited on, and the tracker runs on its own thread so OBS's render thread never waits
-// on it either. The liner therefore trails the picture by a frame or two.
+// The OBS filter.
+//
+// Face tracking takes a few milliseconds and the frame has to come back from the GPU first, so
+// a frame's face points are only ready a couple of frames after the frame itself. Drawing the
+// liner from those late points onto the current frame left it behind whenever the head moved
+// (during a turn, on the bridge of the nose). So the filter holds the video back instead:
+//
+//   1. Each new frame is copied into a small ring of textures, and a downscaled copy is read
+//      back (one frame later, so the GPU is never waited on) and handed to the tracker thread.
+//   2. What OBS shows is the frame from DISPLAY_DELAY frames ago, with the liner drawn from
+//      that same frame's face points.
+//
+// The video runs DISPLAY_DELAY frames late, the way OBS's own Render Delay filter delays it,
+// and OBS's render thread never waits on the GPU or on the tracker.
 
 #include "eyeliner-shape.hpp"
 #include "face-tracker.hpp"
@@ -13,8 +20,9 @@
 #include <plugin-support.h>
 
 #include <algorithm>
-#include <atomic>
+#include <array>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -23,6 +31,15 @@ using namespace eyeliner;
 
 namespace {
 
+// Frames between capturing a frame and showing it. The face points are read back one frame
+// after capture and tracked in a few milliseconds, so they're ready by the frame after that.
+constexpr uint64_t DISPLAY_DELAY = 2;
+// Frames kept: the ones waiting to be shown, plus the one being captured.
+constexpr size_t FRAME_SLOTS = DISPLAY_DELAY + 2;
+// Results kept, so a slightly late lookup still finds its frame.
+constexpr size_t RESULT_HISTORY = 8;
+// Frames the tracker may have queued; it normally keeps up, and this caps memory if it can't.
+constexpr size_t MAX_QUEUED_FRAMES = 3;
 // The tracker sees the frame at most this wide. A face filling a third of a 1080p webcam
 // frame is still ~200 pixels across, plenty for the 256x256 landmark model.
 constexpr uint32_t MAX_CAPTURE_WIDTH = 960;
@@ -44,8 +61,13 @@ struct TrackedFace {
 	uint32_t frame_height;
 };
 
-// Runs the face tracker on its own thread, always on the newest frame it has been given.
-// Frames that arrive while it's busy replace each other, so it never falls behind.
+// What the tracker found in one frame. `frame_id` 0 means no frame has been tracked yet.
+struct TrackingResult {
+	uint64_t frame_id = 0;
+	std::optional<TrackedFace> face;
+};
+
+// Runs the face tracker on its own thread, one frame at a time, in the order they arrive.
 class TrackerThread {
 public:
 	TrackerThread() : thread([this] { run(); }) {}
@@ -60,55 +82,67 @@ public:
 		thread.join();
 	}
 
-	void submit(const uint8_t *pixels, uint32_t linesize, uint32_t width, uint32_t height)
+	void submit(uint64_t frame_id, const uint8_t *pixels, uint32_t linesize, uint32_t width, uint32_t height)
 	{
+		Frame frame{frame_id, width, height, std::vector<uint8_t>(size_t(width) * height * 4)};
+		for (uint32_t row = 0; row < height; row++)
+			std::copy_n(pixels + size_t(row) * linesize, width * 4, &frame.pixels[size_t(row) * width * 4]);
 		{
 			std::lock_guard lock(mutex);
-			pending.resize(size_t(width) * height * 4);
-			for (uint32_t row = 0; row < height; row++)
-				std::copy_n(pixels + size_t(row) * linesize, width * 4,
-					    &pending[size_t(row) * width * 4]);
-			pending_width = width;
-			pending_height = height;
-			has_pending = true;
+			if (queue.size() == MAX_QUEUED_FRAMES)
+				queue.pop_front();
+			queue.push_back(std::move(frame));
 		}
 		wake.notify_one();
 	}
 
-	std::optional<TrackedFace> latest_face()
+	// The result for `frame_id`, or if that frame wasn't tracked, for the newest frame before it.
+	TrackingResult result_for(uint64_t frame_id)
 	{
 		std::lock_guard lock(mutex);
-		return face;
+		TrackingResult best;
+		for (const TrackingResult &result : results)
+			if (result.frame_id <= frame_id && result.frame_id > best.frame_id)
+				best = result;
+		return best;
 	}
 
 private:
+	struct Frame {
+		uint64_t id;
+		uint32_t width;
+		uint32_t height;
+		std::vector<uint8_t> pixels;
+	};
+
 	void run()
 	{
 		std::unique_ptr<FaceTracker> tracker = load_tracker();
-		std::vector<uint8_t> frame;
 		while (true) {
-			uint32_t width, height;
+			Frame frame;
 			{
 				std::unique_lock lock(mutex);
-				wake.wait(lock, [this] { return stopping || has_pending; });
+				wake.wait(lock, [this] { return stopping || !queue.empty(); });
 				if (stopping)
 					return;
-				frame.swap(pending);
-				width = pending_width;
-				height = pending_height;
-				has_pending = false;
+				frame = std::move(queue.front());
+				queue.pop_front();
 			}
 			if (!tracker)
 				continue;
 
 			std::optional<FaceMesh> points;
 			try {
-				points = tracker->track({frame.data(), int(width), int(height), int(width * 4)});
+				points = tracker->track({frame.pixels.data(), int(frame.width), int(frame.height),
+							 int(frame.width * 4)});
 			} catch (const Ort::Exception &error) {
 				obs_log(LOG_ERROR, "Face tracking failed: %s", error.what());
 			}
 			std::lock_guard lock(mutex);
-			face = points ? std::optional(TrackedFace{*points, width, height}) : std::nullopt;
+			TrackingResult &slot = results[frame.id % RESULT_HISTORY];
+			slot.frame_id = frame.id;
+			slot.face = points ? std::optional(TrackedFace{*points, frame.width, frame.height})
+					   : std::nullopt;
 		}
 	}
 
@@ -145,11 +179,8 @@ private:
 	std::mutex mutex;
 	std::condition_variable wake;
 	bool stopping = false;
-	std::vector<uint8_t> pending;
-	uint32_t pending_width = 0;
-	uint32_t pending_height = 0;
-	bool has_pending = false;
-	std::optional<TrackedFace> face;
+	std::deque<Frame> queue;
+	std::array<TrackingResult, RESULT_HISTORY> results;
 	std::thread thread; // last, so it starts after everything it uses exists
 };
 
@@ -174,6 +205,12 @@ Settings read_settings(obs_data_t *data)
 	return settings;
 }
 
+// One captured frame, waiting to be shown.
+struct FrameSlot {
+	gs_texrender_t *texture = nullptr;
+	uint64_t frame_id = 0;
+};
+
 class EyelinerFilter {
 public:
 	EyelinerFilter(obs_source_t *context, obs_data_t *data) : context(context) { update(data); }
@@ -181,6 +218,8 @@ public:
 	~EyelinerFilter()
 	{
 		obs_enter_graphics();
+		for (FrameSlot &slot : slots)
+			gs_texrender_destroy(slot.texture);
 		gs_texrender_destroy(capture);
 		gs_stagesurface_destroy(stage);
 		gs_vertexbuffer_destroy(vertices);
@@ -196,28 +235,131 @@ public:
 	void render()
 	{
 		obs_source_t *target = obs_filter_get_target(context);
-		uint32_t width = obs_source_get_base_width(target);
-		uint32_t height = obs_source_get_base_height(target);
-		if (!target || width == 0 || height == 0) {
+		uint32_t width = target ? obs_source_get_base_width(target) : 0;
+		uint32_t height = target ? obs_source_get_base_height(target) : 0;
+		if (width == 0 || height == 0) {
 			obs_source_skip_video_filter(context);
 			return;
 		}
 
-		if (!obs_source_process_filter_begin(context, GS_RGBA, OBS_ALLOW_DIRECT_RENDERING))
-			return;
-		obs_source_process_filter_end(context, obs_get_base_effect(OBS_EFFECT_DEFAULT), width, height);
+		// OBS can render a source more than once per frame (preview, projectors); capture once.
+		uint64_t video_time = obs_get_video_frame_time();
+		if (video_time != last_video_time) {
+			last_video_time = video_time;
+			capture_frame(target, width, height);
+		}
 
-		draw_liner(width, height);
-		send_frame_to_tracker(target, width, height);
+		uint64_t shown_id = latest_frame_id > DISPLAY_DELAY ? latest_frame_id - DISPLAY_DELAY : 1;
+		const FrameSlot *shown = &slots[shown_id % FRAME_SLOTS];
+		if (shown->frame_id != shown_id) // just started: nothing that old yet
+			shown = &slots[latest_frame_id % FRAME_SLOTS];
+		gs_texture_t *texture = gs_texrender_get_texture(shown->texture);
+		if (!texture) {
+			obs_source_skip_video_filter(context);
+			return;
+		}
+
+		draw_texture(texture, width, height);
+		TrackingResult result = tracker.result_for(shown->frame_id);
+		if (result.face)
+			draw_liner(*result.face, width, height);
 	}
 
 private:
-	void draw_liner(uint32_t width, uint32_t height)
+	// Copies the frame beneath this filter into the next slot and starts the tracker's copy.
+	void capture_frame(obs_source_t *target, uint32_t width, uint32_t height)
 	{
-		std::optional<TrackedFace> face = tracker.latest_face();
-		if (!face)
-			return;
+		latest_frame_id++;
+		FrameSlot &slot = slots[latest_frame_id % FRAME_SLOTS];
+		if (!slot.texture)
+			slot.texture = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		gs_texrender_reset(slot.texture);
 
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		if (gs_texrender_begin_with_color_space(slot.texture, width, height, GS_CS_SRGB)) {
+			vec4 clear_color;
+			vec4_zero(&clear_color);
+			gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+			gs_ortho(0.0f, float(width), 0.0f, float(height), -100.0f, 100.0f);
+			// The same way OBS's own GPU delay filter renders what's beneath it.
+			obs_source_t *parent = obs_filter_get_parent(context);
+			uint32_t parent_flags = obs_source_get_output_flags(target);
+			bool custom_draw = (parent_flags & OBS_SOURCE_CUSTOM_DRAW) != 0;
+			bool async = (parent_flags & OBS_SOURCE_ASYNC) != 0;
+			if (target == parent && !custom_draw && !async)
+				obs_source_default_render(target);
+			else
+				obs_source_video_render(target);
+			gs_texrender_end(slot.texture);
+		}
+		gs_blend_state_pop();
+		slot.frame_id = latest_frame_id;
+
+		send_to_tracker(slot, width, height);
+	}
+
+	// Reads back last frame's downscaled copy for the tracker, then starts this frame's.
+	void send_to_tracker(const FrameSlot &slot, uint32_t width, uint32_t height)
+	{
+		if (stage_frame_id != 0) {
+			uint8_t *pixels;
+			uint32_t linesize;
+			if (gs_stagesurface_map(stage, &pixels, &linesize)) {
+				tracker.submit(stage_frame_id, pixels, linesize, gs_stagesurface_get_width(stage),
+					       gs_stagesurface_get_height(stage));
+				gs_stagesurface_unmap(stage);
+			}
+			stage_frame_id = 0;
+		}
+
+		gs_texture_t *texture = gs_texrender_get_texture(slot.texture);
+		if (!texture)
+			return;
+		uint32_t capture_width = std::min(width, MAX_CAPTURE_WIDTH);
+		uint32_t capture_height = std::max(1u, uint32_t(uint64_t(height) * capture_width / width));
+		if (!capture)
+			capture = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		if (!stage || gs_stagesurface_get_width(stage) != capture_width ||
+		    gs_stagesurface_get_height(stage) != capture_height) {
+			gs_stagesurface_destroy(stage);
+			stage = gs_stagesurface_create(capture_width, capture_height, GS_RGBA);
+		}
+
+		gs_texrender_reset(capture);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		if (gs_texrender_begin(capture, capture_width, capture_height)) {
+			// The full-size frame into the smaller texture, which scales it down. The bytes are
+			// copied as they are (no sRGB conversion): the face models expect ordinary RGB.
+			gs_ortho(0.0f, float(width), 0.0f, float(height), -100.0f, 100.0f);
+			const bool previous_srgb = gs_framebuffer_srgb_enabled();
+			gs_enable_framebuffer_srgb(false);
+			gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), texture);
+			while (gs_effect_loop(effect, "Draw"))
+				gs_draw_sprite(texture, 0, width, height);
+			gs_enable_framebuffer_srgb(previous_srgb);
+			gs_texrender_end(capture);
+			gs_stage_texture(stage, gs_texrender_get_texture(capture));
+			stage_frame_id = slot.frame_id;
+		}
+		gs_blend_state_pop();
+	}
+
+	static void draw_texture(gs_texture_t *texture, uint32_t width, uint32_t height)
+	{
+		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		const bool previous_srgb = gs_framebuffer_srgb_enabled();
+		gs_enable_framebuffer_srgb(true);
+		gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), texture);
+		while (gs_effect_loop(effect, "Draw"))
+			gs_draw_sprite(texture, 0, width, height);
+		gs_enable_framebuffer_srgb(previous_srgb);
+	}
+
+	void draw_liner(TrackedFace face, uint32_t width, uint32_t height)
+	{
 		Settings current;
 		{
 			std::lock_guard lock(settings_mutex);
@@ -225,12 +367,12 @@ private:
 		}
 
 		// The tracker saw a downscaled frame; bring its points up to the source's size.
-		float scale_x = float(width) / face->frame_width, scale_y = float(height) / face->frame_height;
-		for (Point &point : face->points) {
+		float scale_x = float(width) / face.frame_width, scale_y = float(height) / face.frame_height;
+		for (Point &point : face.points) {
 			point.x *= scale_x;
 			point.y *= scale_y;
 		}
-		std::vector<Vertex> triangles = eyeliner_triangles(face->points, current.look);
+		std::vector<Vertex> triangles = eyeliner_triangles(face.points, current.look);
 		uint32_t count = std::min(uint32_t(triangles.size()), VERTEX_CAPACITY) / 3 * 3;
 		if (count == 0)
 			return;
@@ -274,64 +416,18 @@ private:
 		return gs_vertexbuffer_create(data, GS_DYNAMIC);
 	}
 
-	// Reads back last frame's copy for the tracker, then starts this frame's copy.
-	void send_frame_to_tracker(obs_source_t *target, uint32_t width, uint32_t height)
-	{
-		if (stage_pending) {
-			uint8_t *pixels;
-			uint32_t linesize;
-			if (gs_stagesurface_map(stage, &pixels, &linesize)) {
-				tracker.submit(pixels, linesize, gs_stagesurface_get_width(stage),
-					       gs_stagesurface_get_height(stage));
-				gs_stagesurface_unmap(stage);
-			}
-			stage_pending = false;
-		}
-
-		uint32_t capture_width = std::min(width, MAX_CAPTURE_WIDTH);
-		uint32_t capture_height = std::max(1u, uint32_t(uint64_t(height) * capture_width / width));
-		if (!capture)
-			capture = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-		if (!stage || gs_stagesurface_get_width(stage) != capture_width ||
-		    gs_stagesurface_get_height(stage) != capture_height) {
-			gs_stagesurface_destroy(stage);
-			stage = gs_stagesurface_create(capture_width, capture_height, GS_RGBA);
-		}
-
-		gs_texrender_reset(capture);
-		gs_blend_state_push();
-		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-		if (gs_texrender_begin(capture, capture_width, capture_height)) {
-			vec4 clear_color;
-			vec4_zero(&clear_color);
-			gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
-			// The source's full size into the smaller texture, which scales it down.
-			gs_ortho(0.0f, float(width), 0.0f, float(height), -100.0f, 100.0f);
-			// The same way OBS's own GPU delay filter renders what's beneath it.
-			obs_source_t *parent = obs_filter_get_parent(context);
-			uint32_t parent_flags = obs_source_get_output_flags(target);
-			bool custom_draw = (parent_flags & OBS_SOURCE_CUSTOM_DRAW) != 0;
-			bool async = (parent_flags & OBS_SOURCE_ASYNC) != 0;
-			if (target == parent && !custom_draw && !async)
-				obs_source_default_render(target);
-			else
-				obs_source_video_render(target);
-			gs_texrender_end(capture);
-			gs_stage_texture(stage, gs_texrender_get_texture(capture));
-			stage_pending = true;
-		}
-		gs_blend_state_pop();
-	}
-
 	obs_source_t *context;
 	TrackerThread tracker;
 	std::mutex settings_mutex;
 	Settings settings;
 
-	// Graphics resources: created and used only on OBS's render thread.
+	// Used only on OBS's render thread.
+	std::array<FrameSlot, FRAME_SLOTS> slots;
+	uint64_t latest_frame_id = 0;
+	uint64_t last_video_time = 0;
 	gs_texrender_t *capture = nullptr;
 	gs_stagesurf_t *stage = nullptr;
-	bool stage_pending = false;
+	uint64_t stage_frame_id = 0; // the frame waiting in `stage`, or 0
 	gs_vertbuffer_t *vertices = nullptr;
 };
 
