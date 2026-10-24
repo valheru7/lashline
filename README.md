@@ -1,6 +1,6 @@
 # Lashline
 
-Eyeliner for OBS Studio.
+Eyeliner filter for OBS Studio.
 
 ![Before and after Lashline](docs/before-after.jpg)
 
