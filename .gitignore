@@ -22,3 +22,7 @@ __pycache__/
 # README images
 !/docs/*.jpg
 !/docs/*.gif
+
+# Swift package
+/.build/
+/.swiftpm/

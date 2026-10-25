@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <utility>
 
 namespace eyeliner {
 
@@ -80,6 +81,8 @@ void sample_into(const ImageView &image, const Affine &to_image, int size, float
 				for (int channel = 0; channel < 3; channel++)
 					rgb[channel] += weight * pixel[channel];
 			}
+			if (image.order == PixelOrder::BGRA)
+				std::swap(rgb[0], rgb[2]);
 			for (float value : rgb)
 				*out++ = low + value * scale;
 		}

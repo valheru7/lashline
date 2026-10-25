@@ -25,12 +25,16 @@ struct Point {
 	float y = 0;
 };
 
-// An RGBA image in memory. The tracker only reads it.
+// The byte order of a 4-byte pixel. OBS hands us RGBA; iPhone cameras give BGRA.
+enum class PixelOrder { RGBA, BGRA };
+
+// An image in memory, 4 bytes per pixel. The tracker only reads it.
 struct ImageView {
 	const uint8_t *pixels = nullptr;
 	int width = 0;
 	int height = 0;
 	int stride = 0; // bytes per row
+	PixelOrder order = PixelOrder::RGBA;
 };
 
 // A rotated square in image pixels.

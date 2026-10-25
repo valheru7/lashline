@@ -1,11 +1,16 @@
 #pragma once
 
-// ONNX Runtime is loaded at run time from a full path instead of being linked. Another OBS
-// plugin may ship its own onnxruntime library of a different version, and loading ours by
-// path keeps the two from clashing.
+// In OBS, ONNX Runtime is loaded at run time from a full path instead of being linked. Another
+// OBS plugin may ship its own onnxruntime library of a different version, and loading ours by
+// path keeps the two from clashing. The iPhone app links it normally (LASHLINE_LINK_ONNXRUNTIME),
+// from the onnxruntime framework.
 
+#ifdef LASHLINE_LINK_ONNXRUNTIME
+#include <onnxruntime/onnxruntime_cxx_api.h>
+#else
 #define ORT_API_MANUAL_INIT
 #include <onnxruntime_cxx_api.h>
+#endif
 
 #include <string>
 
