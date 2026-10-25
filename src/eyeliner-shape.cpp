@@ -105,6 +105,8 @@ struct LidCurve {
 	std::vector<Point> points;
 	std::vector<Point> tangents; // toward the outer corner
 	std::vector<Point> normals;  // up, away from the eyeball
+	Point axis;                  // from the inner to the outer corner
+	Point axis_up;               // perpendicular to `axis`, on the lid's side
 	float eye_width;
 };
 
@@ -133,6 +135,10 @@ LidCurve lid_curve(const FaceMesh &face, const std::array<int, 9> &indices)
 	if (dot(curve.normals[count / 2], arch) < 0)
 		for (Point &normal : curve.normals)
 			normal = normal * -1;
+	curve.axis = normalized(lid.back() - lid.front());
+	curve.axis_up = {curve.axis.y, -curve.axis.x};
+	if (dot(curve.axis_up, arch) < 0)
+		curve.axis_up = curve.axis_up * -1;
 	return curve;
 }
 
@@ -208,13 +214,23 @@ std::vector<Section> liner_sections(const LidCurve &lid, const Look &look)
 	}
 
 	if (look.wing_length > 0) {
-		// The wing continues the lid's outer direction, tipped up, and tapers to a point.
-		Point direction = turn(lid.tangents.back(), lid.normals.back(), look.wing_lift_degrees * PI / 180);
-		Point tip = lid.points.back() + direction * (look.wing_length * lid.eye_width);
-		Section corner = sections.back();
-		for (int i = 1; i <= WING_SAMPLES; i++) {
+		// The wing points up from the eye's own line (inner corner to outer corner) and tapers
+		// to a point. Measuring the lift from the lid's direction instead aims it down, since
+		// the lid already curves down into the outer corner.
+		Point direction = turn(lid.axis, lid.axis_up, look.wing_lift_degrees * PI / 180);
+		Point corner = lid.points.back();
+		Point tip = corner + direction * (look.wing_length * lid.eye_width);
+		// The wing's base spans across the wing, not across the lid, so the wing keeps its
+		// width however far it turns from the lid. The gap between the lid's last section and
+		// this one fills in as the wedge at the corner.
+		Point across{-direction.y, direction.x};
+		if (dot(across, lid.axis_up) < 0)
+			across = across * -1;
+		Section base{corner - across * (BELOW_LASH_LINE * lid.eye_width),
+			     corner + across * (look.outer_thickness * lid.eye_width)};
+		for (int i = 0; i <= WING_SAMPLES; i++) {
 			float t = float(i) / WING_SAMPLES;
-			sections.push_back({lerp(corner.low, tip, t), lerp(corner.high, tip, t)});
+			sections.push_back({lerp(base.low, tip, t), lerp(base.high, tip, t)});
 		}
 	}
 	return sections;
@@ -228,9 +244,11 @@ std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid)
 		float t = 0.4f + 0.58f * i / (LASH_COUNT - 1);
 		float progress = (t - 0.4f) / 0.58f;
 		size_t index = size_t(std::round(t * (lid.points.size() - 1)));
-		Point root = lid.points[index], up = lid.normals[index], along = lid.tangents[index];
+		// Directions come from the eye's line, not the lid's local curve, which turns down
+		// into the outer corner and would point the outer lashes down with it.
+		Point root = lid.points[index], up = lid.axis_up, along = lid.axis;
 		// Lashes near the middle point up; toward the outer corner they sweep outward.
-		float sweep = (15 + 45 * progress) * PI / 180;
+		float sweep = (10 + 40 * progress) * PI / 180;
 		float lash_length = (0.13f + 0.07f * progress) * lid.eye_width;
 		float half_width = 0.012f * lid.eye_width;
 		// A slight curl: the tip bends further outward than the base.
