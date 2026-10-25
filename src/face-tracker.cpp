@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <utility>
 
@@ -150,6 +151,22 @@ Ort::Session open_session(Ort::Env &env, const std::string &path)
 #endif
 }
 
+// ONNX Runtime's builds for Apple platforms and Linux send usage telemetry to Microsoft
+// (mobile.events.data.microsoft.com). Lashline promises nothing leaves the device, so it's
+// turned off twice: the variable stops the telemetry system from starting with the runtime,
+// and the call covers anything after.
+Ort::Env make_env()
+{
+#ifdef _WIN32
+	_putenv_s("ORT_DISABLE_TELEMETRY", "1");
+#else
+	setenv("ORT_DISABLE_TELEMETRY", "1", 1);
+#endif
+	Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "lashline");
+	env.DisableTelemetryEvents();
+	return env;
+}
+
 Ort::Value tensor_for(std::vector<float> &data, int size)
 {
 	static const Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -160,7 +177,7 @@ Ort::Value tensor_for(std::vector<float> &data, int size)
 } // namespace
 
 FaceTracker::FaceTracker(const std::string &detector_model_path, const std::string &landmark_model_path)
-	: env(ORT_LOGGING_LEVEL_WARNING, "lashline")
+	: env(make_env())
 {
 	detector = open_session(env, detector_model_path);
 	landmarker = open_session(env, landmark_model_path);
