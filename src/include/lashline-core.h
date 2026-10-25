@@ -48,6 +48,12 @@ void lashline_tracker_destroy(LashlineTracker *tracker);
 bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
 			 LashlinePoint *points);
 
+// Tracks up to `max_faces` faces in a BGRA image. Fills `points` with
+// LASHLINE_FACE_POINT_COUNT points per face, one face after another (so it needs room for
+// max_faces * LASHLINE_FACE_POINT_COUNT), and returns how many faces there are.
+int lashline_track_faces_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
+			      int max_faces, LashlinePoint *points);
+
 // Writes the liner's triangles (three vertices each, in the same space as `points`) into
 // `vertices` and returns how many vertices there are. If that's more than `capacity`, only
 // `capacity` were written; call again with a bigger buffer.

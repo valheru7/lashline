@@ -9,6 +9,10 @@
 //    model (256x256).
 // 3. On the next frame the region comes from those points, so the detector only runs again
 //    when the face is lost.
+//
+// track_all() follows several faces the same way, one region each, and also runs the
+// detector every few frames while it has room for more, to pick up someone stepping in.
+// (The Python prototype only does one face.)
 
 #include "onnx-runtime.hpp"
 
@@ -55,14 +59,19 @@ public:
 	// The face's points in image pixels, or nothing when there's no face.
 	std::optional<FaceMesh> track(const ImageView &image);
 
+	// Up to `max_faces` faces' points in image pixels, in the order they were found.
+	std::vector<FaceMesh> track_all(const ImageView &image, int max_faces);
+
 private:
-	std::optional<Region> detect(const ImageView &image);
+	// Every face the detector finds, most confident first.
+	std::vector<Region> detect(const ImageView &image);
 	std::optional<FaceMesh> landmarks(const ImageView &image, const Region &region);
 
 	Ort::Env env;
 	Ort::Session detector{nullptr};
 	Ort::Session landmarker{nullptr};
-	std::optional<Region> region;
+	std::vector<Region> regions; // one per face being followed
+	int frames_since_detection = 0;
 	std::vector<float> detector_input;
 	std::vector<float> landmark_input;
 };

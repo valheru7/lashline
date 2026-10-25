@@ -3,7 +3,7 @@
 //
 //   swift run lashline-track-image photo.png
 //
-// Prints the outer eye corners and the liner's vertex count, to compare with
+// Prints each face's outer eye corners and liner vertex count. With one face, compare with
 // `build-tests/track-video` on the same frame.
 
 import CoreGraphics
@@ -42,18 +42,26 @@ pixels.withUnsafeMutableBytes { buffer in
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 }
 
-var points = [LashlinePoint](repeating: LashlinePoint(), count: Int(LASHLINE_FACE_POINT_COUNT))
-// The tracker refines its face region from the previous frame, so run it twice like a
+let maxFaces = 4
+let pointsPerFace = Int(LASHLINE_FACE_POINT_COUNT)
+var points = [LashlinePoint](repeating: LashlinePoint(), count: maxFaces * pointsPerFace)
+// The tracker refines each face's region from the previous frame, so run it twice like a
 // second video frame would.
+var faceCount: Int32 = 0
 for _ in 0..<2 {
-    guard lashline_track_bgra(tracker, pixels, Int32(width), Int32(height), Int32(stride), &points) else {
-        print("no face")
-        exit(1)
-    }
+    faceCount = lashline_track_faces_bgra(tracker, pixels, Int32(width), Int32(height), Int32(stride),
+                                          Int32(maxFaces), &points)
 }
-print(String(format: "right eye corner (33): %.1f, %.1f", points[33].x, points[33].y))
-print(String(format: "left eye corner (263): %.1f, %.1f", points[263].x, points[263].y))
+guard faceCount > 0 else {
+    print("no face")
+    exit(1)
+}
+print("faces: \(faceCount)")
 
 var look = lashline_default_look()
-let vertexCount = lashline_liner_triangles(points, &look, nil, 0)
-print("liner: \(vertexCount) vertices")
+for face in 0..<Int(faceCount) {
+    let face = Array(points[face * pointsPerFace..<(face + 1) * pointsPerFace])
+    print(String(format: "right eye corner (33): %.1f, %.1f", face[33].x, face[33].y))
+    print(String(format: "left eye corner (263): %.1f, %.1f", face[263].x, face[263].y))
+    print("liner: \(lashline_liner_triangles(face, &look, nil, 0)) vertices")
+}

@@ -17,6 +17,8 @@ constexpr float MIN_DETECTION_SCORE = 0.5f;
 constexpr float MIN_FACE_PRESENCE = 0.5f;
 // The region fed to the landmark model is this much larger than the face.
 constexpr float ROI_SCALE = 1.5f;
+// While following fewer faces than asked for, look for new ones this often (in frames).
+constexpr int REDETECT_INTERVAL = 10;
 // Detector keypoints 0 and 1 are the eyes; mesh points 33 and 263 are the outer eye corners.
 constexpr int DETECTOR_RIGHT_EYE = 0;
 constexpr int DETECTOR_LEFT_EYE = 1;
@@ -123,6 +125,19 @@ Affine region_to_image(const Region &region, int crop_size)
 		sin, cos,  region.center.y - sin * half - cos * half};
 }
 
+// Whether two regions are on the same face: their centers are closer than 40% of the larger
+// one. Side-by-side faces in a selfie are about a face width (two thirds of a region) apart.
+bool same_face(const Region &a, const Region &b)
+{
+	float dx = a.center.x - b.center.x, dy = a.center.y - b.center.y;
+	return std::hypot(dx, dy) < 0.4f * std::max(a.size, b.size);
+}
+
+bool same_face_as_any(const Region &region, const std::vector<Region> &others)
+{
+	return std::any_of(others.begin(), others.end(), [&](const Region &other) { return same_face(region, other); });
+}
+
 Ort::Session open_session(Ort::Env &env, const std::string &path)
 {
 	Ort::SessionOptions options;
@@ -153,17 +168,45 @@ FaceTracker::FaceTracker(const std::string &detector_model_path, const std::stri
 
 std::optional<FaceMesh> FaceTracker::track(const ImageView &image)
 {
-	if (!region) {
-		region = detect(image);
-		if (!region)
-			return std::nullopt;
-	}
-	std::optional<FaceMesh> points = landmarks(image, *region);
-	region = points ? std::optional(region_from_landmarks(*points)) : std::nullopt;
-	return points;
+	std::vector<FaceMesh> faces = track_all(image, 1);
+	return faces.empty() ? std::nullopt : std::optional(faces.front());
 }
 
-std::optional<Region> FaceTracker::detect(const ImageView &image)
+std::vector<FaceMesh> FaceTracker::track_all(const ImageView &image, int max_faces)
+{
+	if (int(regions.size()) > max_faces)
+		regions.resize(size_t(max_faces));
+
+	// Look for faces whenever there are none, and every so often when there's room for more.
+	frames_since_detection++;
+	if (regions.empty() || (int(regions.size()) < max_faces && frames_since_detection >= REDETECT_INTERVAL)) {
+		frames_since_detection = 0;
+		for (const Region &found : detect(image)) {
+			if (int(regions.size()) >= max_faces)
+				break;
+			if (!same_face_as_any(found, regions))
+				regions.push_back(found);
+		}
+	}
+
+	std::vector<FaceMesh> faces;
+	std::vector<Region> followed;
+	for (const Region &region : regions) {
+		std::optional<FaceMesh> points = landmarks(image, region);
+		if (!points)
+			continue; // lost this one
+		Region next = region_from_landmarks(*points);
+		// Two regions can drift onto the same face; keep the first.
+		if (same_face_as_any(next, followed))
+			continue;
+		followed.push_back(next);
+		faces.push_back(*points);
+	}
+	regions = std::move(followed);
+	return faces;
+}
+
+std::vector<Region> FaceTracker::detect(const ImageView &image)
 {
 	static const std::vector<Point> anchors = detector_anchors();
 
@@ -181,22 +224,32 @@ std::optional<Region> FaceTracker::detect(const ImageView &image)
 	const float *regressors = outputs[0].GetTensorData<float>();
 	const float *scores = outputs[1].GetTensorData<float>();
 
-	int best = int(std::max_element(scores, scores + DETECTOR_ANCHOR_COUNT) - scores);
-	if (sigmoid(scores[best]) < MIN_DETECTION_SCORE)
-		return std::nullopt;
+	// Neighboring anchors fire on the same face, so take the most confident first and skip
+	// later ones on a face already taken.
+	std::vector<int> confident;
+	for (int i = 0; i < DETECTOR_ANCHOR_COUNT; i++)
+		if (sigmoid(scores[i]) >= MIN_DETECTION_SCORE)
+			confident.push_back(i);
+	std::sort(confident.begin(), confident.end(), [&](int a, int b) { return scores[a] > scores[b]; });
 
-	const float *raw = regressors + best * DETECTOR_VALUES_PER_ANCHOR;
-	Point anchor = anchors[best];
-	// Detector output is in 128-pixel units relative to the anchor; undo the letterbox.
-	auto to_image = [&](float x, float y) {
-		Point square{x + anchor.x * DETECTOR_SIZE, y + anchor.y * DETECTOR_SIZE};
-		return Point{(square.x - pad_x) / scale, (square.y - pad_y) / scale};
-	};
-	Point center = to_image(raw[0], raw[1]);
-	float box_size = std::max(raw[2], raw[3]) / scale;
-	Point right_eye = to_image(raw[4 + 2 * DETECTOR_RIGHT_EYE], raw[5 + 2 * DETECTOR_RIGHT_EYE]);
-	Point left_eye = to_image(raw[4 + 2 * DETECTOR_LEFT_EYE], raw[5 + 2 * DETECTOR_LEFT_EYE]);
-	return Region{center, box_size * ROI_SCALE, eye_rotation(right_eye, left_eye)};
+	std::vector<Region> faces;
+	for (int index : confident) {
+		const float *raw = regressors + index * DETECTOR_VALUES_PER_ANCHOR;
+		Point anchor = anchors[index];
+		// Detector output is in 128-pixel units relative to the anchor; undo the letterbox.
+		auto to_image = [&](float x, float y) {
+			Point square{x + anchor.x * DETECTOR_SIZE, y + anchor.y * DETECTOR_SIZE};
+			return Point{(square.x - pad_x) / scale, (square.y - pad_y) / scale};
+		};
+		Point center = to_image(raw[0], raw[1]);
+		float box_size = std::max(raw[2], raw[3]) / scale;
+		Point right_eye = to_image(raw[4 + 2 * DETECTOR_RIGHT_EYE], raw[5 + 2 * DETECTOR_RIGHT_EYE]);
+		Point left_eye = to_image(raw[4 + 2 * DETECTOR_LEFT_EYE], raw[5 + 2 * DETECTOR_LEFT_EYE]);
+		Region face{center, box_size * ROI_SCALE, eye_rotation(right_eye, left_eye)};
+		if (!same_face_as_any(face, faces))
+			faces.push_back(face);
+	}
+	return faces;
 }
 
 std::optional<FaceMesh> FaceTracker::landmarks(const ImageView &image, const Region &face)

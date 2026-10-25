@@ -62,6 +62,17 @@ bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int wi
 	return true;
 }
 
+int lashline_track_faces_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
+			      int max_faces, LashlinePoint *points)
+{
+	ImageView image{pixels, width, height, stride, PixelOrder::BGRA};
+	std::vector<FaceMesh> faces = tracker->tracker.track_all(image, max_faces);
+	Point *out = reinterpret_cast<Point *>(points);
+	for (const FaceMesh &face : faces)
+		out = std::copy(face.begin(), face.end(), out);
+	return int(faces.size());
+}
+
 size_t lashline_liner_triangles(const LashlinePoint *points, const LashlineLook *look, LashlineVertex *vertices,
 				size_t capacity)
 {
