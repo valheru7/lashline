@@ -59,6 +59,24 @@ Flatpak version of OBS.
 If Lashline isn't in the list, OBS didn't load it. Open **Help → Log Files → Show Log Files**
 and look for lines mentioning lashline.
 
+### Use it in Zoom, Google Meet or Teams
+
+OBS's **Virtual Camera** shows up as a webcam in other apps, so your liner comes along to
+video calls.
+
+1. In OBS, make a scene with just your webcam (with the Lashline filter), so no overlays
+   or alerts end up on the call.
+2. Click **Start Virtual Camera** under **Controls**, at the bottom right.
+3. In the call app, choose **OBS Virtual Camera** as your camera:
+   - **Zoom:** Settings → Video → Camera.
+   - **Google Meet:** ⋮ → Settings → Video. If it isn't listed, restart your browser.
+   - **Teams:** Settings → Devices → Camera.
+
+Keep OBS open for the whole call; the camera goes black when it closes. Only one app can use
+the real webcam at a time, so let OBS have it. Zoom's **Touch up my appearance** can fight
+with the liner, so turn it off. On macOS, the first time you start the Virtual Camera, OBS
+asks you to allow its system extension in **System Settings → Privacy & Security**.
+
 ## Settings
 
 | Setting | What it does |
