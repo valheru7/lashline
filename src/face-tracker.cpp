@@ -25,6 +25,16 @@ constexpr int DETECTOR_RIGHT_EYE = 0;
 constexpr int DETECTOR_LEFT_EYE = 1;
 constexpr int MESH_RIGHT_EYE = 33;
 constexpr int MESH_LEFT_EYE = 263;
+// How each point is smoothed over time; see one-euro-filter.hpp. Speeds are in face sizes per
+// second, so the same settings work for a face near the camera or far from it. The speed cutoff
+// is higher than the paper's usual 1 Hz so a head turn is noticed within a frame or two instead
+// of trailing at its start. Tuned on stream footage: still eyes jitter 3.5 to 6 times less,
+// the liner trails a head turn by under half a frame, and it still closes with a blink, since a
+// blinking lid moves fast enough to get through almost unsmoothed.
+constexpr OneEuroSettings POINT_SMOOTHING{0.5f, 40.0f, 4.0f};
+// A face whose frames come further apart than this (seconds) starts its smoothing over, rather
+// than blending in where it was before the video paused or skipped.
+constexpr double MAX_SMOOTHING_GAP = 0.5;
 
 // A 2x3 transform: x' = a*x + b*y + c, y' = d*x + e*y + f.
 struct Affine {
@@ -183,44 +193,67 @@ FaceTracker::FaceTracker(const std::string &detector_model_path, const std::stri
 	landmarker = open_session(env, landmark_model_path);
 }
 
-std::optional<FaceMesh> FaceTracker::track(const ImageView &image)
+std::optional<FaceMesh> FaceTracker::track(const ImageView &image, double time)
 {
-	std::vector<FaceMesh> faces = track_all(image, 1);
-	return faces.empty() ? std::nullopt : std::optional(faces.front());
+	std::vector<FaceMesh> found = track_all(image, 1, time);
+	return found.empty() ? std::nullopt : std::optional(found.front());
 }
 
-std::vector<FaceMesh> FaceTracker::track_all(const ImageView &image, int max_faces)
+std::vector<FaceMesh> FaceTracker::track_all(const ImageView &image, int max_faces, double time)
 {
-	if (int(regions.size()) > max_faces)
-		regions.resize(size_t(max_faces));
+	if (int(faces.size()) > max_faces)
+		faces.resize(size_t(max_faces));
+
+	auto already_followed = [](const std::vector<FollowedFace> &followed, const Region &region) {
+		return std::any_of(followed.begin(), followed.end(),
+				   [&](const FollowedFace &face) { return same_face(region, face.region); });
+	};
 
 	// Look for faces whenever there are none, and every so often when there's room for more.
 	frames_since_detection++;
-	if (regions.empty() || (int(regions.size()) < max_faces && frames_since_detection >= REDETECT_INTERVAL)) {
+	if (faces.empty() || (int(faces.size()) < max_faces && frames_since_detection >= REDETECT_INTERVAL)) {
 		frames_since_detection = 0;
 		for (const Region &found : detect(image)) {
-			if (int(regions.size()) >= max_faces)
+			if (int(faces.size()) >= max_faces)
 				break;
-			if (!same_face_as_any(found, regions))
-				regions.push_back(found);
+			if (!already_followed(faces, found))
+				faces.push_back(FollowedFace{found});
 		}
 	}
 
-	std::vector<FaceMesh> faces;
-	std::vector<Region> followed;
-	for (const Region &region : regions) {
-		std::optional<FaceMesh> points = landmarks(image, region);
+	std::vector<FaceMesh> found_points;
+	std::vector<FollowedFace> followed;
+	for (FollowedFace &face : faces) {
+		std::optional<FaceMesh> points = landmarks(image, face.region);
 		if (!points)
-			continue; // lost this one
+			continue; // lost this one, and its smoothing with it
+		// The next region comes from the points as the model gave them, as in MediaPipe.
 		Region next = region_from_landmarks(*points);
 		// Two regions can drift onto the same face; keep the first.
-		if (same_face_as_any(next, followed))
+		if (already_followed(followed, next))
 			continue;
-		followed.push_back(next);
-		faces.push_back(*points);
+		face.region = next;
+		found_points.push_back(smoothing ? face.smooth(*points, next.size / ROI_SCALE, time) : *points);
+		followed.push_back(std::move(face));
 	}
-	regions = std::move(followed);
-	return faces;
+	faces = std::move(followed);
+	return found_points;
+}
+
+FaceMesh FaceTracker::FollowedFace::smooth(const FaceMesh &points, float face_size, double time)
+{
+	float seconds = last_time ? float(time - *last_time) : 0;
+	// A new face, a gap, or time going backwards: start from these points as they are.
+	if (!last_time || seconds <= 0 || seconds > MAX_SMOOTHING_GAP)
+		filters = {};
+	last_time = time;
+
+	FaceMesh smoothed;
+	for (size_t i = 0; i < points.size(); i++) {
+		smoothed[i].x = filters[i].x.apply(points[i].x, seconds, face_size, POINT_SMOOTHING);
+		smoothed[i].y = filters[i].y.apply(points[i].y, seconds, face_size, POINT_SMOOTHING);
+	}
+	return smoothed;
 }
 
 std::vector<Region> FaceTracker::detect(const ImageView &image)

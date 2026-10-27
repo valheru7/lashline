@@ -16,7 +16,7 @@ let package = Package(
             name: "LashlineCore",
             dependencies: ["onnxruntime"],
             path: "src",
-            sources: ["lashline-core.cpp", "face-tracker.cpp", "eyeliner-shape.cpp"],
+            sources: ["lashline-core.cpp", "face-tracker.cpp", "one-euro-filter.cpp", "eyeliner-shape.cpp"],
             publicHeadersPath: "include",
             cxxSettings: [.define("LASHLINE_LINK_ONNXRUNTIME")],
             linkerSettings: [.linkedFramework("CoreML"), .linkedFramework("Foundation"), .linkedFramework("Network")]

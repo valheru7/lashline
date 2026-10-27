@@ -7,10 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 set(ONNXRUNTIME_DIR "" CACHE PATH "An extracted ONNX Runtime release (only its headers are used)")
 
-add_executable(track-video track-video.cpp ../src/face-tracker.cpp ../src/onnx-runtime.cpp)
+add_executable(track-video track-video.cpp ../src/face-tracker.cpp ../src/one-euro-filter.cpp ../src/onnx-runtime.cpp)
 target_include_directories(track-video PRIVATE ../src "${ONNXRUNTIME_DIR}/include")
 target_link_libraries(track-video PRIVATE ${CMAKE_DL_LIBS})
 
-add_executable(render-video render-video.cpp ../src/eyeliner-shape.cpp ../src/face-tracker.cpp ../src/onnx-runtime.cpp)
+add_executable(
+  render-video
+  render-video.cpp
+  ../src/eyeliner-shape.cpp
+  ../src/face-tracker.cpp
+  ../src/one-euro-filter.cpp
+  ../src/onnx-runtime.cpp
+)
 target_include_directories(render-video PRIVATE ../src "${ONNXRUNTIME_DIR}/include")
 target_link_libraries(render-video PRIVATE ${CMAKE_DL_LIBS})

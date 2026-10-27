@@ -39,6 +39,8 @@ constexpr size_t FRAME_SLOTS = DISPLAY_DELAY + 2;
 // Results kept, so a slightly late lookup still finds its frame.
 constexpr size_t RESULT_HISTORY = 8;
 // Frames the tracker may have queued; it normally keeps up, and this caps memory if it can't.
+// A frame dropped here is drawn with the frame before's points. The tracker's smoothing goes by
+// each frame's own time, so it copes with the gap.
 constexpr size_t MAX_QUEUED_FRAMES = 3;
 // The tracker sees the frame at most this wide. A face filling a third of a 1080p webcam
 // frame is still ~200 pixels across, plenty for the 256x256 landmark model.
@@ -82,9 +84,12 @@ public:
 		thread.join();
 	}
 
-	void submit(uint64_t frame_id, const uint8_t *pixels, uint32_t linesize, uint32_t width, uint32_t height)
+	// `video_time` is OBS's time for the frame, in nanoseconds.
+	void submit(uint64_t frame_id, uint64_t video_time, const uint8_t *pixels, uint32_t linesize, uint32_t width,
+		    uint32_t height)
 	{
-		Frame frame{frame_id, width, height, std::vector<uint8_t>(size_t(width) * height * 4)};
+		Frame frame{frame_id, video_time / 1e9, width, height,
+			    std::vector<uint8_t>(size_t(width) * height * 4)};
 		for (uint32_t row = 0; row < height; row++)
 			std::copy_n(pixels + size_t(row) * linesize, width * 4, &frame.pixels[size_t(row) * width * 4]);
 		{
@@ -110,6 +115,7 @@ public:
 private:
 	struct Frame {
 		uint64_t id;
+		double time; // seconds
 		uint32_t width;
 		uint32_t height;
 		std::vector<uint8_t> pixels;
@@ -134,7 +140,8 @@ private:
 			std::optional<FaceMesh> points;
 			try {
 				points = tracker->track({frame.pixels.data(), int(frame.width), int(frame.height),
-							 int(frame.width * 4)});
+							 int(frame.width * 4)},
+							frame.time);
 			} catch (const Ort::Exception &error) {
 				obs_log(LOG_ERROR, "Face tracking failed: %s", error.what());
 			}
@@ -209,6 +216,7 @@ Settings read_settings(obs_data_t *data)
 struct FrameSlot {
 	gs_texrender_t *texture = nullptr;
 	uint64_t frame_id = 0;
+	uint64_t video_time = 0; // OBS's time for the frame, in nanoseconds
 };
 
 class EyelinerFilter {
@@ -246,7 +254,7 @@ public:
 		uint64_t video_time = obs_get_video_frame_time();
 		if (video_time != last_video_time) {
 			last_video_time = video_time;
-			capture_frame(target, width, height);
+			capture_frame(target, width, height, video_time);
 		}
 
 		uint64_t shown_id = latest_frame_id > DISPLAY_DELAY ? latest_frame_id - DISPLAY_DELAY : 1;
@@ -267,7 +275,7 @@ public:
 
 private:
 	// Copies the frame beneath this filter into the next slot and starts the tracker's copy.
-	void capture_frame(obs_source_t *target, uint32_t width, uint32_t height)
+	void capture_frame(obs_source_t *target, uint32_t width, uint32_t height, uint64_t video_time)
 	{
 		latest_frame_id++;
 		FrameSlot &slot = slots[latest_frame_id % FRAME_SLOTS];
@@ -295,6 +303,7 @@ private:
 		}
 		gs_blend_state_pop();
 		slot.frame_id = latest_frame_id;
+		slot.video_time = video_time;
 
 		send_to_tracker(slot, width, height);
 	}
@@ -306,8 +315,8 @@ private:
 			uint8_t *pixels;
 			uint32_t linesize;
 			if (gs_stagesurface_map(stage, &pixels, &linesize)) {
-				tracker.submit(stage_frame_id, pixels, linesize, gs_stagesurface_get_width(stage),
-					       gs_stagesurface_get_height(stage));
+				tracker.submit(stage_frame_id, stage_video_time, pixels, linesize,
+					       gs_stagesurface_get_width(stage), gs_stagesurface_get_height(stage));
 				gs_stagesurface_unmap(stage);
 			}
 			stage_frame_id = 0;
@@ -343,6 +352,7 @@ private:
 			gs_texrender_end(capture);
 			gs_stage_texture(stage, gs_texrender_get_texture(capture));
 			stage_frame_id = slot.frame_id;
+			stage_video_time = slot.video_time;
 		}
 		gs_blend_state_pop();
 	}
@@ -428,6 +438,7 @@ private:
 	gs_texrender_t *capture = nullptr;
 	gs_stagesurf_t *stage = nullptr;
 	uint64_t stage_frame_id = 0; // the frame waiting in `stage`, or 0
+	uint64_t stage_video_time = 0;
 	gs_vertbuffer_t *vertices = nullptr;
 };
 

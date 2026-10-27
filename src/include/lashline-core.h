@@ -43,6 +43,10 @@ LashlineTracker *lashline_tracker_create(const char *detector_model_path, const 
 					 size_t error_size);
 void lashline_tracker_destroy(LashlineTracker *tracker);
 
+// Each face's points are smoothed from frame to frame, so the liner holds steady. Smoothing
+// goes by when each frame was captured; the functions without a time use the time they're
+// called, which is close enough for frames tracked as they arrive.
+
 // Tracks a face in a BGRA image (the iPhone camera's format). When there is one, fills
 // `points` (LASHLINE_FACE_POINT_COUNT of them, in image pixels) and returns true.
 bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
@@ -53,6 +57,17 @@ bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int wi
 // max_faces * LASHLINE_FACE_POINT_COUNT), and returns how many faces there are.
 int lashline_track_faces_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
 			      int max_faces, LashlinePoint *points);
+
+// lashline_track_faces_bgra for a frame captured at `time_seconds` (from any starting point,
+// such as the camera frame's presentation time).
+int lashline_track_faces_bgra_at(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
+				 double time_seconds, int max_faces, LashlinePoint *points);
+
+// Forgets every face, so the next frame starts afresh, e.g. after switching cameras.
+void lashline_tracker_reset(LashlineTracker *tracker);
+
+// Smoothing is on unless this turns it off.
+void lashline_tracker_set_smoothing(LashlineTracker *tracker, bool enabled);
 
 // Writes the liner's triangles (three vertices each, in the same space as `points`) into
 // `vertices` and returns how many vertices there are. If that's more than `capacity`, only

@@ -4,6 +4,7 @@
 #include "face-tracker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 
@@ -19,6 +20,12 @@ struct LashlineTracker {
 };
 
 namespace {
+
+// Now, in seconds, for callers that don't say when their frame was captured.
+double seconds_now()
+{
+	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 Look look_from(const LashlineLook &look)
 {
@@ -55,7 +62,7 @@ bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int wi
 			 LashlinePoint *points)
 {
 	ImageView image{pixels, width, height, stride, PixelOrder::BGRA};
-	std::optional<FaceMesh> face = tracker->tracker.track(image);
+	std::optional<FaceMesh> face = tracker->tracker.track(image, seconds_now());
 	if (!face)
 		return false;
 	std::copy(face->begin(), face->end(), reinterpret_cast<Point *>(points));
@@ -65,12 +72,28 @@ bool lashline_track_bgra(LashlineTracker *tracker, const uint8_t *pixels, int wi
 int lashline_track_faces_bgra(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
 			      int max_faces, LashlinePoint *points)
 {
+	return lashline_track_faces_bgra_at(tracker, pixels, width, height, stride, seconds_now(), max_faces, points);
+}
+
+int lashline_track_faces_bgra_at(LashlineTracker *tracker, const uint8_t *pixels, int width, int height, int stride,
+				 double time_seconds, int max_faces, LashlinePoint *points)
+{
 	ImageView image{pixels, width, height, stride, PixelOrder::BGRA};
-	std::vector<FaceMesh> faces = tracker->tracker.track_all(image, max_faces);
+	std::vector<FaceMesh> faces = tracker->tracker.track_all(image, max_faces, time_seconds);
 	Point *out = reinterpret_cast<Point *>(points);
 	for (const FaceMesh &face : faces)
 		out = std::copy(face.begin(), face.end(), out);
 	return int(faces.size());
+}
+
+void lashline_tracker_reset(LashlineTracker *tracker)
+{
+	tracker->tracker.reset();
+}
+
+void lashline_tracker_set_smoothing(LashlineTracker *tracker, bool enabled)
+{
+	tracker->tracker.set_smoothing(enabled);
 }
 
 size_t lashline_liner_triangles(const LashlinePoint *points, const LashlineLook *look, LashlineVertex *vertices,

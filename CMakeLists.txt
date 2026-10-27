@@ -39,7 +39,13 @@ target_add_onnxruntime(${CMAKE_PROJECT_NAME})
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.cpp src/eyeliner-filter.cpp src/eyeliner-shape.cpp src/face-tracker.cpp src/onnx-runtime.cpp
+  PRIVATE
+    src/plugin-main.cpp
+    src/eyeliner-filter.cpp
+    src/eyeliner-shape.cpp
+    src/face-tracker.cpp
+    src/one-euro-filter.cpp
+    src/onnx-runtime.cpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

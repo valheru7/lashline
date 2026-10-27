@@ -25,6 +25,8 @@ guard let tracker = lashline_tracker_create(models.appending(path: "face_detecto
     exit(1)
 }
 defer { lashline_tracker_destroy(tracker) }
+// Unsmoothed, like track-video's points.
+lashline_tracker_set_smoothing(tracker, false)
 
 guard let source = CGImageSourceCreateWithURL(URL(filePath: CommandLine.arguments[1]) as CFURL, nil),
       let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {

@@ -10,10 +10,15 @@
 // 3. On the next frame the region comes from those points, so the detector only runs again
 //    when the face is lost.
 //
+// 4. Each face's points are smoothed over time (a One Euro filter on every point), since the
+//    landmark model's points wobble by a pixel or so from frame to frame even when the face is
+//    still. The regions in step 3 come from the unsmoothed points.
+//
 // track_all() follows several faces the same way, one region each, and also runs the
 // detector every few frames while it has room for more, to pick up someone stepping in.
-// (The Python prototype only does one face.)
+// (The Python prototype only does one face, and doesn't smooth: compare it with smoothing off.)
 
+#include "one-euro-filter.hpp"
 #include "onnx-runtime.hpp"
 
 #include <array>
@@ -56,13 +61,36 @@ public:
 	// Throws Ort::Exception when the models can't be loaded.
 	FaceTracker(const std::string &detector_model_path, const std::string &landmark_model_path);
 
-	// The face's points in image pixels, or nothing when there's no face.
-	std::optional<FaceMesh> track(const ImageView &image);
+	// The face's points in image pixels, or nothing when there's no face. `time` is when the
+	// frame was captured, in seconds from any starting point; smoothing goes by it.
+	std::optional<FaceMesh> track(const ImageView &image, double time);
 
 	// Up to `max_faces` faces' points in image pixels, in the order they were found.
-	std::vector<FaceMesh> track_all(const ImageView &image, int max_faces);
+	std::vector<FaceMesh> track_all(const ImageView &image, int max_faces, double time);
+
+	// Smoothing is on unless this turns it off.
+	void set_smoothing(bool enabled) { smoothing = enabled; }
+
+	// Forgets every face, so the next frame starts afresh: for when the video jumps to
+	// somewhere else, like a different camera.
+	void reset() { faces.clear(); }
 
 private:
+	struct PointFilter {
+		OneEuroFilter x;
+		OneEuroFilter y;
+	};
+
+	struct FollowedFace {
+		Region region; // where to look in the next frame
+		// Each point's smoothing, which belongs to this face alone.
+		std::array<PointFilter, FACE_MESH_POINT_COUNT> filters;
+		std::optional<double> last_time; // when the last points were smoothed
+
+		// `points` smoothed with this face's earlier ones. `face_size` is in pixels.
+		FaceMesh smooth(const FaceMesh &points, float face_size, double time);
+	};
+
 	// Every face the detector finds, most confident first.
 	std::vector<Region> detect(const ImageView &image);
 	std::optional<FaceMesh> landmarks(const ImageView &image, const Region &region);
@@ -70,7 +98,8 @@ private:
 	Ort::Env env;
 	Ort::Session detector{nullptr};
 	Ort::Session landmarker{nullptr};
-	std::vector<Region> regions; // one per face being followed
+	std::vector<FollowedFace> faces; // one per face being followed
+	bool smoothing = true;
 	int frames_since_detection = 0;
 	std::vector<float> detector_input;
 	std::vector<float> landmark_input;

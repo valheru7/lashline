@@ -17,6 +17,8 @@ namespace {
 
 float COLOR[3] = {20, 16, 18}; // soft black, RGB; a 6th argument "R,G,B" changes it
 constexpr float OPACITY = 0.85f;
+// The frames' rate, which the tracker's smoothing goes by; the output above is written at 60.
+constexpr double FRAMES_PER_SECOND = 60;
 
 // Blends one triangle over the image, interpolating alpha across it like the GPU does.
 void fill_triangle(std::vector<uint8_t> &image, int width, int height, const Vertex &a, const Vertex &b,
@@ -73,8 +75,8 @@ int main(int argc, char **argv)
 		std::sscanf(argv[6], "%f,%f,%f", &COLOR[0], &COLOR[1], &COLOR[2]);
 
 	std::vector<uint8_t> frame(size_t(width) * height * 4);
-	while (std::fread(frame.data(), 1, frame.size(), stdin) == frame.size()) {
-		if (auto face = tracker.track({frame.data(), width, height, width * 4})) {
+	for (int index = 0; std::fread(frame.data(), 1, frame.size(), stdin) == frame.size(); index++) {
+		if (auto face = tracker.track({frame.data(), width, height, width * 4}, index / FRAMES_PER_SECOND)) {
 			std::vector<Vertex> triangles = eyeliner_triangles(*face, look);
 			for (size_t i = 0; i + 2 < triangles.size(); i += 3)
 				fill_triangle(frame, width, height, triangles[i], triangles[i + 1], triangles[i + 2]);

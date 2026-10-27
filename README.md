@@ -94,7 +94,9 @@ Sizes are relative to your eyes, so the look stays the same as you lean in or ou
 
 1. Every frame, a downscaled copy of the webcam picture goes to a background thread.
 2. There, Google's MediaPipe face models find 478 points on the face. The models are run
-   through ONNX Runtime and converted to ONNX in `data/models/`.
+   through ONNX Runtime and converted to ONNX in `data/models/`. The points are smoothed from
+   frame to frame (a [One Euro filter](https://gery.casiez.net/1euro/)), so the liner holds
+   still when you do but keeps up when you turn or blink.
 3. The upper-lid points become a smooth curve, and the liner is a band along it: thin at the
    inner corner, thicker at the outer corner, with a wing. It's drawn on the GPU with soft,
    faded edges.
@@ -118,8 +120,8 @@ The ONNX Runtime release is downloaded during configuration.
 
 `tests/` builds two small tools that run on video files:
 
-- `track-video` prints the tracked points for each frame. Compare them with
-  `prototype/compare_tracker.py`.
+- `track-video` prints the tracked points for each frame, unsmoothed unless you give it the
+  frame rate. Compare them with `prototype/compare_tracker.py`.
 - `render-video` draws the liner with a software renderer.
 
 `prototype/` is the Python version that was used to design the look.
