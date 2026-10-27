@@ -68,8 +68,14 @@ public:
 	// Up to `max_faces` faces' points in image pixels, in the order they were found.
 	std::vector<FaceMesh> track_all(const ImageView &image, int max_faces, double time);
 
-	// Smoothing is on unless this turns it off.
-	void set_smoothing(bool enabled) { smoothing = enabled; }
+	// Smoothing is on unless this turns it off. Either way each face's smoothing starts over,
+	// so turning it back on never blends in points from before it was off.
+	void set_smoothing(bool enabled)
+	{
+		smoothing = enabled;
+		for (FollowedFace &face : faces)
+			face.last_time.reset();
+	}
 
 	// Forgets every face, so the next frame starts afresh: for when the video jumps to
 	// somewhere else, like a different camera.

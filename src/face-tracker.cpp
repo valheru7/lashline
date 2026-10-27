@@ -242,6 +242,13 @@ std::vector<FaceMesh> FaceTracker::track_all(const ImageView &image, int max_fac
 
 FaceMesh FaceTracker::FollowedFace::smooth(const FaceMesh &points, float face_size, double time)
 {
+	// Speeds are divided by the face's size, so a face with no size (points the model put all in
+	// one spot) would make them infinite. Pass such points through and start over next frame.
+	if (!(face_size > 0)) {
+		last_time.reset();
+		return points;
+	}
+
 	float seconds = last_time ? float(time - *last_time) : 0;
 	// A new face, a gap, or time going backwards: start from these points as they are.
 	if (!last_time || seconds <= 0 || seconds > MAX_SMOOTHING_GAP)
