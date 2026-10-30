@@ -13,11 +13,24 @@ namespace {
 constexpr std::array<int, 9> RIGHT_UPPER_LID{133, 173, 157, 158, 159, 160, 161, 246, 33};
 constexpr std::array<int, 9> LEFT_UPPER_LID{362, 398, 384, 385, 386, 387, 388, 466, 263};
 
+// The top of the forehead and the bottom of the chin, which give the face's "up".
+constexpr int FOREHEAD = 10;
+constexpr int CHIN = 152;
+
 constexpr int CURVE_SAMPLES_PER_SEGMENT = 8;
 constexpr int WING_SAMPLES = 6;
 constexpr int LASH_COUNT = 7;
-// The liner starts a hair below the lid's edge so no skin shows between it and the lashes.
-constexpr float BELOW_LASH_LINE = 0.008f;
+// The tracked lid line can be off by a few percent of the eye's width (the landmark model sees
+// each eye only about 35 pixels across), which showed as a strip of skin between the liner and
+// the lashes. Snapping to the lash line (face-tracker.cpp) closes most of that, but not where
+// the lash line is faint or the lid has no contrast. So the liner also reaches down into the
+// lash line, and its lash side fades out over a wide soft edge: a small miss overlaps the
+// lashes instead of leaving a gap. Sizes are fractions of the eye's width.
+constexpr float BELOW_LASH_LINE = 0.02f;
+constexpr float LASH_SIDE_SOFTNESS = 0.035f;
+// The inner corner is the point the tracker places least surely, so the liner fades in over
+// this much of the lid rather than starting at a hard tip.
+constexpr float INNER_CORNER_FADE = 0.18f;
 constexpr float PI = 3.14159265f;
 // When the head turns, the far eye looks narrower than the near one, and once it's partly
 // behind the nose its mesh points are guesses: lashes drawn there land on the nose. So the
@@ -40,6 +53,23 @@ constexpr float LASH_CORNER_FADE_END = 0.0f;
 constexpr float LINER_CORNER_FADE_START = 0.11f;
 constexpr float LINER_CORNER_FADE_END = 0.03f;
 constexpr float NOSE_EDGE_SOFTNESS = 0.08f;
+// The middle of each eye's upper and lower lid, for how open the eye is: the gap between them
+// in eye widths, 0.2 to 0.45 open, about 0.1 looking down and under 0.05 closed. The mesh's
+// guess for a closing lid runs straighter than the real one, so anything drawn on it sits off
+// the lid like a strip lash peeling away. Closed, real lashes also point down over the cheek,
+// and drawn ones standing up out of the lid look like spikes. So as the eye closes the lashes
+// fade and the wing shrinks, then the liner fades too; a blink is quick enough that it isn't
+// missed.
+constexpr int RIGHT_LID_TOP = 159;
+constexpr int RIGHT_LID_BOTTOM = 145;
+constexpr int LEFT_LID_TOP = 386;
+constexpr int LEFT_LID_BOTTOM = 374;
+constexpr float LASH_OPEN_FADE_START = 0.15f;
+constexpr float LASH_OPEN_FADE_END = 0.06f;
+constexpr float WING_OPEN_FADE_START = 0.15f;
+constexpr float WING_OPEN_FADE_END = 0.06f;
+constexpr float LINER_OPEN_FADE_START = 0.08f;
+constexpr float LINER_OPEN_FADE_END = 0.03f;
 
 Point operator+(Point a, Point b)
 {
@@ -106,7 +136,7 @@ struct LidCurve {
 	std::vector<Point> tangents; // toward the outer corner
 	std::vector<Point> normals;  // up, away from the eyeball
 	Point axis;                  // from the inner to the outer corner
-	Point axis_up;               // perpendicular to `axis`, on the lid's side
+	Point axis_up;               // perpendicular to `axis`, toward the forehead
 	float eye_width;
 };
 
@@ -127,30 +157,42 @@ LidCurve lid_curve(const FaceMesh &face, const std::array<int, 9> &indices)
 		curve.tangents.push_back(tangent);
 		curve.normals.push_back({tangent.y, -tangent.x});
 	}
-	// The upper lid arches above the line between the corners; that's the "up" side.
-	Point lid_middle{0, 0};
-	for (Point p : lid)
-		lid_middle = lid_middle + p * (1.0f / lid.size());
-	Point arch = lid_middle - (lid.front() + lid.back()) * 0.5f;
-	if (dot(curve.normals[count / 2], arch) < 0)
-		for (Point &normal : curve.normals)
-			normal = normal * -1;
+	// "Up" is the side toward the forehead. It can't come from the lid's own arch: a closed
+	// lid is nearly straight and often sags below the line between the corners, which turned
+	// the liner, wing and lashes upside down for the length of every blink.
+	Point face_up = face[FOREHEAD] - face[CHIN];
 	curve.axis = normalized(lid.back() - lid.front());
 	curve.axis_up = {curve.axis.y, -curve.axis.x};
-	if (dot(curve.axis_up, arch) < 0)
+	if (dot(curve.axis_up, face_up) < 0)
 		curve.axis_up = curve.axis_up * -1;
+	// The normals all sit on the same side of the curve (it always runs inner to outer
+	// corner), so one check decides them all.
+	if (dot(curve.normals[count / 2], curve.axis_up) < 0)
+		for (Point &normal : curve.normals)
+			normal = normal * -1;
 	return curve;
+}
+
+// 1 while `ratio` is at or above `start`, falling smoothly to 0 at `end`.
+float fade(float ratio, float start, float end)
+{
+	float t = std::clamp((ratio - end) / (start - end), 0.0f, 1.0f);
+	return t * t * (3 - 2 * t);
 }
 
 // One cross-section of a stroke: its two edges at one point along it.
 struct Section {
-	Point low;  // the lash side
-	Point high; // the far side
+	Point low;         // the lash side
+	Point high;        // the far side
+	float alpha = 1.0f; // the share of the stroke's opacity here
 };
 
-// Adds a stroke as triangles: a core of `opacity` between consecutive sections, plus a fringe
-// that fades from the edge to transparent `feather` pixels further out, all the way round.
-void add_stroke(const std::vector<Section> &sections, float feather, float opacity, std::vector<Vertex> &out)
+// Adds a stroke as triangles: a core of `opacity` (times each section's `alpha`) between
+// consecutive sections, plus a fringe
+// that fades from the edge to transparent `feather` pixels further out, all the way round
+// (`low_feather` on the lash side).
+void add_stroke(const std::vector<Section> &sections, float feather, float low_feather, float opacity,
+		std::vector<Vertex> &out)
 {
 	auto triangle = [&](Vertex a, Vertex b, Vertex c) {
 		out.push_back(a);
@@ -177,10 +219,11 @@ void add_stroke(const std::vector<Section> &sections, float feather, float opaci
 	}
 
 	for (size_t i = 0; i + 1 < count; i++) {
-		Vertex low_a{sections[i].low, opacity}, high_a{sections[i].high, opacity};
-		Vertex low_b{sections[i + 1].low, opacity}, high_b{sections[i + 1].high, opacity};
-		Vertex fringe_low_a{sections[i].low - across[i] * feather, 0};
-		Vertex fringe_low_b{sections[i + 1].low - across[i + 1] * feather, 0};
+		float alpha_a = opacity * sections[i].alpha, alpha_b = opacity * sections[i + 1].alpha;
+		Vertex low_a{sections[i].low, alpha_a}, high_a{sections[i].high, alpha_a};
+		Vertex low_b{sections[i + 1].low, alpha_b}, high_b{sections[i + 1].high, alpha_b};
+		Vertex fringe_low_a{sections[i].low - across[i] * low_feather, 0};
+		Vertex fringe_low_b{sections[i + 1].low - across[i + 1] * low_feather, 0};
 		Vertex fringe_high_a{sections[i].high + across[i] * feather, 0};
 		Vertex fringe_high_b{sections[i + 1].high + across[i + 1] * feather, 0};
 		quad(low_a, low_b, high_b, high_a);
@@ -191,15 +234,17 @@ void add_stroke(const std::vector<Section> &sections, float feather, float opaci
 	// Soft caps at both ends.
 	for (auto [index, outward] : {std::pair{size_t(0), along[0] * -1}, std::pair{count - 1, along[count - 1]}}) {
 		const Section &end = sections[index];
-		Point fringe_low = end.low - across[index] * feather, fringe_high = end.high + across[index] * feather;
-		quad({end.low, opacity}, {end.high, opacity}, {fringe_high + outward * feather, 0},
+		float alpha = opacity * end.alpha;
+		Point fringe_low = end.low - across[index] * low_feather, fringe_high = end.high + across[index] * feather;
+		quad({end.low, alpha}, {end.high, alpha}, {fringe_high + outward * feather, 0},
 		     {fringe_low + outward * feather, 0});
-		triangle({end.low, opacity}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
-		triangle({end.high, opacity}, {fringe_high, 0}, {fringe_high + outward * feather, 0});
+		triangle({end.low, alpha}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
+		triangle({end.high, alpha}, {fringe_high, 0}, {fringe_high + outward * feather, 0});
 	}
 }
 
-std::vector<Section> liner_sections(const LidCurve &lid, const Look &look)
+// `wing_scale` shrinks the wing from its full length (1) to nothing (0).
+std::vector<Section> liner_sections(const LidCurve &lid, const Look &look, float wing_scale)
 {
 	std::vector<Section> sections;
 	size_t count = lid.points.size();
@@ -210,24 +255,28 @@ std::vector<Section> liner_sections(const LidCurve &lid, const Look &look)
 		float thickness =
 			look.inner_thickness + (look.outer_thickness - look.inner_thickness) * std::pow(t, 1.6f);
 		sections.push_back({lid.points[i] - lid.normals[i] * (BELOW_LASH_LINE * lid.eye_width),
-				    lid.points[i] + lid.normals[i] * (thickness * lid.eye_width)});
+				    lid.points[i] + lid.normals[i] * (thickness * lid.eye_width),
+				    fade(t, INNER_CORNER_FADE, 0.0f)});
 	}
 
-	if (look.wing_length > 0) {
+	float wing_length = look.wing_length * wing_scale;
+	if (wing_length > 0) {
 		// The wing points up from the eye's own line (inner corner to outer corner) and tapers
 		// to a point. Measuring the lift from the lid's direction instead aims it down, since
 		// the lid already curves down into the outer corner.
 		Point direction = turn(lid.axis, lid.axis_up, look.wing_lift_degrees * PI / 180);
 		Point corner = lid.points.back();
-		Point tip = corner + direction * (look.wing_length * lid.eye_width);
+		Point tip = corner + direction * (wing_length * lid.eye_width);
 		// The wing's base spans across the wing, not across the lid, so the wing keeps its
 		// width however far it turns from the lid. The gap between the lid's last section and
 		// this one fills in as the wedge at the corner.
 		Point across{-direction.y, direction.x};
 		if (dot(across, lid.axis_up) < 0)
 			across = across * -1;
+		// The base narrows with the wing too, so a shrinking wing doesn't leave a full-size
+		// wedge at the corner that then vanishes all at once.
 		Section base{corner - across * (BELOW_LASH_LINE * lid.eye_width),
-			     corner + across * (look.outer_thickness * lid.eye_width)};
+			     corner + across * (look.outer_thickness * wing_scale * lid.eye_width)};
 		for (int i = 0; i <= WING_SAMPLES; i++) {
 			float t = float(i) / WING_SAMPLES;
 			sections.push_back({lerp(base.low, tip, t), lerp(base.high, tip, t)});
@@ -263,13 +312,6 @@ std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid)
 		});
 	}
 	return lashes;
-}
-
-// 1 while `ratio` is at or above `start`, falling smoothly to 0 at `end`.
-float fade(float ratio, float start, float end)
-{
-	float t = std::clamp((ratio - end) / (start - end), 0.0f, 1.0f);
-	return t * t * (3 - 2 * t);
 }
 
 // The middle of the nose as a line down the face, so a point can be checked against the part
@@ -327,16 +369,26 @@ std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 		float width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
 		float corner_clearance = widest > 0 ? nose.clearance(lid.points.front(), left_eye) / widest : 1.0f;
 
-		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END) *
-				      fade(corner_clearance, LINER_CORNER_FADE_START, LINER_CORNER_FADE_END);
-		if (liner_opacity > 0)
-			add_stroke(liner_sections(lid, look), feather, liner_opacity, triangles);
+		// Measured toward the forehead, so an upper lid snapped to just below the lower one
+		// (see face-tracker.cpp) reads as closed, not as opening again.
+		Point lid_gap = face[left_eye ? LEFT_LID_TOP : RIGHT_LID_TOP] -
+				face[left_eye ? LEFT_LID_BOTTOM : RIGHT_LID_BOTTOM];
+		float openness = lid.eye_width > 0 ? std::max(0.0f, dot(lid_gap, lid.axis_up)) / lid.eye_width : 0.0f;
 
+		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END) *
+				      fade(corner_clearance, LINER_CORNER_FADE_START, LINER_CORNER_FADE_END) *
+				      fade(openness, LINER_OPEN_FADE_START, LINER_OPEN_FADE_END);
+		float wing_scale = fade(openness, WING_OPEN_FADE_START, WING_OPEN_FADE_END);
+		if (liner_opacity > 0)
+			add_stroke(liner_sections(lid, look, wing_scale), feather,
+				   feather + LASH_SIDE_SOFTNESS * lid.eye_width, liner_opacity, triangles);
 		float lash_opacity = fade(width_ratio, LASH_FADE_START, LASH_FADE_END) *
-				     fade(corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END);
+				     fade(corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END) *
+				     fade(openness, LASH_OPEN_FADE_START, LASH_OPEN_FADE_END);
 		if (look.lashes && lash_opacity > 0)
 			for (const auto &lash : lash_strokes(lid))
-				add_stroke(lash, std::max(1.0f, feather * 0.5f), lash_opacity, triangles);
+				add_stroke(lash, std::max(1.0f, feather * 0.5f), std::max(1.0f, feather * 0.5f),
+					   lash_opacity, triangles);
 
 		// And whatever still lands over the nose is hidden, with a soft edge.
 		float softness = NOSE_EDGE_SOFTNESS * widest;

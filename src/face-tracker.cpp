@@ -36,6 +36,28 @@ constexpr OneEuroSettings POINT_SMOOTHING{0.5f, 40.0f, 4.0f};
 // than blending in where it was before the video paused or skipped.
 constexpr double MAX_SMOOTHING_GAP = 0.5;
 
+// Snapping the upper lids to the lash line. The landmark model sees each eye only about 35
+// pixels across, so its lid line can sit several percent of an eye width off the real one,
+// most of all when the eyes are lowered. The lash line is the darkest line along the lid, so
+// each point between the corners moves to the darkest spot near it, across the lid, in the
+// frame itself. Sizes are fractions of the eye's width.
+// Upper-lid points between the corners, inner to outer; the corners stay where the model put them.
+constexpr std::array<int, 7> RIGHT_UPPER_LID_MIDDLE{173, 157, 158, 159, 160, 161, 246};
+constexpr std::array<int, 7> LEFT_UPPER_LID_MIDDLE{398, 384, 385, 386, 387, 388, 466};
+constexpr std::array<std::pair<int, int>, 2> EYE_CORNERS{{{133, 33}, {362, 263}}};
+constexpr int FOREHEAD = 10;
+constexpr int CHIN = 152;
+// How far either way across the lid to look.
+constexpr float SNAP_RANGE = 0.1f;
+// How wide a strip along the lid each sample averages, so single lashes and noise don't count.
+constexpr float SNAP_STRIP = 0.04f;
+// Darker spots further from the model's guess must be darker by this much (0..255 brightness at
+// the edge of the range), so the iris or a crease far off doesn't win over the lash line.
+constexpr float SNAP_DISTANCE_COST = 25.0f;
+// A lid with less contrast than this (darkest against brightest along the search) has no clear
+// lash line to snap to, so it's left as it is.
+constexpr float SNAP_MIN_CONTRAST = 20.0f;
+
 // A 2x3 transform: x' = a*x + b*y + c, y' = d*x + e*y + f.
 struct Affine {
 	float a, b, c, d, e, f;
@@ -124,6 +146,89 @@ Region region_from_landmarks(const FaceMesh &points)
 	float middle_x = (low_x + high_x) / 2, middle_y = (low_y + high_y) / 2;
 	Point center{middle_x * cos - middle_y * sin, middle_x * sin + middle_y * cos};
 	return {center, std::max(high_x - low_x, high_y - low_y) * ROI_SCALE, rotation};
+}
+
+// Brightness (0..255) at a point, bilinearly; nothing outside the image.
+std::optional<float> brightness(const ImageView &image, Point at)
+{
+	int x0 = int(std::floor(at.x)), y0 = int(std::floor(at.y));
+	if (x0 < 0 || y0 < 0 || x0 + 1 >= image.width || y0 + 1 >= image.height)
+		return std::nullopt;
+	float fx = at.x - x0, fy = at.y - y0, total = 0;
+	for (int corner = 0; corner < 4; corner++) {
+		int cx = x0 + (corner & 1), cy = y0 + (corner >> 1);
+		const uint8_t *pixel = image.pixels + size_t(cy) * image.stride + size_t(cx) * 4;
+		// Green carries most of the brightness and is in the same place in RGBA and BGRA.
+		float weight = ((corner & 1) ? fx : 1 - fx) * ((corner >> 1) ? fy : 1 - fy);
+		total += weight * pixel[1];
+	}
+	return total;
+}
+
+// Moves each eye's upper-lid points onto the darkest line near them (see SNAP_RANGE).
+void snap_upper_lids(FaceMesh &points, const ImageView &image)
+{
+	Point up{points[FOREHEAD].x - points[CHIN].x, points[FOREHEAD].y - points[CHIN].y};
+	const std::array<const std::array<int, 7> *, 2> lids{&RIGHT_UPPER_LID_MIDDLE, &LEFT_UPPER_LID_MIDDLE};
+	for (size_t eye = 0; eye < 2; eye++) {
+		Point inner = points[EYE_CORNERS[eye].first], outer = points[EYE_CORNERS[eye].second];
+		float eye_width = std::hypot(outer.x - inner.x, outer.y - inner.y);
+		if (eye_width < 4)
+			continue; // too small to see a lash line
+		Point along{(outer.x - inner.x) / eye_width, (outer.y - inner.y) / eye_width};
+		Point across{along.y, -along.x}; // toward the forehead
+		if (across.x * up.x + across.y * up.y < 0)
+			across = {-across.x, -across.y};
+
+		float range = SNAP_RANGE * eye_width, half_strip = SNAP_STRIP * eye_width / 2;
+		int steps = std::max(4, int(range * 2)); // about half-pixel steps
+		std::array<float, 7> offsets{};
+		for (size_t i = 0; i < offsets.size(); i++) {
+			Point point = points[(*lids[eye])[i]];
+			float best_score = INFINITY, darkest = INFINITY, brightest = -INFINITY;
+			for (int step = -steps; step <= steps; step++) {
+				float offset = range * step / steps;
+				float total = 0;
+				int samples = 0;
+				for (float side : {-half_strip, 0.0f, half_strip}) {
+					Point at{point.x + across.x * offset + along.x * side,
+						 point.y + across.y * offset + along.y * side};
+					if (std::optional<float> value = brightness(image, at)) {
+						total += *value;
+						samples++;
+					}
+				}
+				if (samples == 0)
+					continue;
+				float value = total / samples;
+				darkest = std::min(darkest, value);
+				brightest = std::max(brightest, value);
+				float distance = offset / range;
+				float score = value + SNAP_DISTANCE_COST * distance * distance;
+				if (score < best_score) {
+					best_score = score;
+					offsets[i] = offset;
+				}
+			}
+			if (brightest - darkest < SNAP_MIN_CONTRAST)
+				offsets[i] = 0;
+		}
+
+		// One point snapping onto something else (a stray lash, the iris) would kink the line,
+		// so each point takes the middle of its own offset and its neighbours'. The two ends have
+		// only one neighbour and keep their own.
+		std::array<float, 7> settled = offsets;
+		for (size_t i = 1; i + 1 < offsets.size(); i++) {
+			std::array<float, 3> nearby{offsets[i - 1], offsets[i], offsets[i + 1]};
+			std::sort(nearby.begin(), nearby.end());
+			settled[i] = nearby[1];
+		}
+		for (size_t i = 0; i < settled.size(); i++) {
+			Point &point = points[(*lids[eye])[i]];
+			point.x += across.x * settled[i];
+			point.y += across.y * settled[i];
+		}
+	}
 }
 
 // The transform from crop pixels to image pixels.
@@ -233,6 +338,8 @@ std::vector<FaceMesh> FaceTracker::track_all(const ImageView &image, int max_fac
 		if (already_followed(followed, next))
 			continue;
 		face.region = next;
+		if (lid_snapping)
+			snap_upper_lids(*points, image);
 		found_points.push_back(smoothing ? face.smooth(*points, next.size / ROI_SCALE, time) : *points);
 		followed.push_back(std::move(face));
 	}

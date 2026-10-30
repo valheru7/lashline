@@ -30,6 +30,8 @@ int main(int argc, char **argv)
 	}
 	std::string models = argv[4];
 	FaceTracker tracker(models + "/face_detector.onnx", models + "/face_landmarks_detector.onnx");
+	// LASHLINE_NO_LID_SNAP=1 shows the landmark model's own lid line, for comparing.
+	tracker.set_lid_snapping(std::getenv("LASHLINE_NO_LID_SNAP") == nullptr);
 	double frames_per_second = argc == 6 ? std::atof(argv[5]) : 0;
 	tracker.set_smoothing(frames_per_second > 0);
 

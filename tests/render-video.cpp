@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -69,6 +70,8 @@ int main(int argc, char **argv)
 	}
 	std::string models = argv[4];
 	FaceTracker tracker(models + "/face_detector.onnx", models + "/face_landmarks_detector.onnx");
+	// LASHLINE_NO_LID_SNAP=1 shows the landmark model's own lid line, for comparing.
+	tracker.set_lid_snapping(std::getenv("LASHLINE_NO_LID_SNAP") == nullptr);
 	Look look;
 	look.lashes = argc > 5 && std::strcmp(argv[5], "lashes") == 0;
 	if (argc > 6)

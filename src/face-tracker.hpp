@@ -10,13 +10,18 @@
 // 3. On the next frame the region comes from those points, so the detector only runs again
 //    when the face is lost.
 //
-// 4. Each face's points are smoothed over time (a One Euro filter on every point), since the
+// 4. The upper lids' points are moved onto the darkest line near them in the frame itself,
+//    the lash line, since the landmark model's lid line can be a few pixels off.
+//
+// 5. Each face's points are smoothed over time (a One Euro filter on every point), since the
 //    landmark model's points wobble by a pixel or so from frame to frame even when the face is
-//    still. The regions in step 3 come from the unsmoothed points.
+//    still. The regions in step 3 come from the points as the model gave them, before steps 4
+//    and 5.
 //
 // track_all() follows several faces the same way, one region each, and also runs the
 // detector every few frames while it has room for more, to pick up someone stepping in.
-// (The Python prototype only does one face, and doesn't smooth: compare it with smoothing off.)
+// (The Python prototype only does one face, and doesn't snap or smooth: compare it with both
+// off.)
 
 #include "one-euro-filter.hpp"
 #include "onnx-runtime.hpp"
@@ -77,6 +82,10 @@ public:
 			face.last_time.reset();
 	}
 
+	// Moving the upper lids onto the lash line seen in the frame (see face-tracker.cpp) is on
+	// unless this turns it off.
+	void set_lid_snapping(bool enabled) { lid_snapping = enabled; }
+
 	// Forgets every face, so the next frame starts afresh: for when the video jumps to
 	// somewhere else, like a different camera.
 	void reset() { faces.clear(); }
@@ -106,6 +115,7 @@ private:
 	Ort::Session landmarker{nullptr};
 	std::vector<FollowedFace> faces; // one per face being followed
 	bool smoothing = true;
+	bool lid_snapping = true;
 	int frames_since_detection = 0;
 	std::vector<float> detector_input;
 	std::vector<float> landmark_input;
