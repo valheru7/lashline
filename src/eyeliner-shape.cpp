@@ -182,8 +182,8 @@ float fade(float ratio, float start, float end)
 
 // One cross-section of a stroke: its two edges at one point along it.
 struct Section {
-	Point low;         // the lash side
-	Point high;        // the far side
+	Point low;          // the lash side
+	Point high;         // the far side
 	float alpha = 1.0f; // the share of the stroke's opacity here
 };
 
@@ -235,7 +235,8 @@ void add_stroke(const std::vector<Section> &sections, float feather, float low_f
 	for (auto [index, outward] : {std::pair{size_t(0), along[0] * -1}, std::pair{count - 1, along[count - 1]}}) {
 		const Section &end = sections[index];
 		float alpha = opacity * end.alpha;
-		Point fringe_low = end.low - across[index] * low_feather, fringe_high = end.high + across[index] * feather;
+		Point fringe_low = end.low - across[index] * low_feather,
+		      fringe_high = end.high + across[index] * feather;
 		quad({end.low, alpha}, {end.high, alpha}, {fringe_high + outward * feather, 0},
 		     {fringe_low + outward * feather, 0});
 		triangle({end.low, alpha}, {fringe_low + outward * feather, 0}, {fringe_low, 0});
