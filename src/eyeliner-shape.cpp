@@ -287,7 +287,7 @@ std::vector<Section> liner_sections(const LidCurve &lid, const Look &look, float
 }
 
 // A few thin, tapered lashes on the outer half of the lid, fanning out toward the corner.
-std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid)
+std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid, const Look &look)
 {
 	std::vector<std::vector<Section>> lashes;
 	for (int i = 0; i < LASH_COUNT; i++) {
@@ -299,8 +299,8 @@ std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid)
 		Point root = lid.points[index], up = lid.axis_up, along = lid.axis;
 		// Lashes near the middle point up; toward the outer corner they sweep outward.
 		float sweep = (10 + 40 * progress) * PI / 180;
-		float lash_length = (0.13f + 0.07f * progress) * lid.eye_width;
-		float half_width = 0.012f * lid.eye_width;
+		float lash_length = (0.13f + 0.07f * progress) * look.lash_length_scale * lid.eye_width;
+		float half_width = 0.012f * look.lash_thickness_scale * lid.eye_width;
 		// A slight curl: the tip bends further outward than the base.
 		Point base_direction = turn(up, along, sweep);
 		Point tip_direction = turn(up, along, sweep + 0.35f);
@@ -387,7 +387,7 @@ std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 				     fade(corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END) *
 				     fade(openness, LASH_OPEN_FADE_START, LASH_OPEN_FADE_END);
 		if (look.lashes && lash_opacity > 0)
-			for (const auto &lash : lash_strokes(lid))
+			for (const auto &lash : lash_strokes(lid, look))
 				add_stroke(lash, std::max(1.0f, feather * 0.5f), std::max(1.0f, feather * 0.5f),
 					   lash_opacity, triangles);
 

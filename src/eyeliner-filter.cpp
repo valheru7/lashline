@@ -55,6 +55,8 @@ constexpr const char *SETTING_WING_LENGTH = "wing_length";
 constexpr const char *SETTING_WING_ANGLE = "wing_angle";
 constexpr const char *SETTING_SOFTNESS = "softness";
 constexpr const char *SETTING_LASHES = "lashes";
+constexpr const char *SETTING_LASH_LENGTH = "lash_length";
+constexpr const char *SETTING_LASH_THICKNESS = "lash_thickness";
 
 // The points of a face, with the size of the frame they were found in.
 struct TrackedFace {
@@ -204,6 +206,8 @@ Settings read_settings(obs_data_t *data)
 	settings.look.wing_lift_degrees = float(obs_data_get_double(data, SETTING_WING_ANGLE));
 	settings.look.softness = float(obs_data_get_double(data, SETTING_SOFTNESS)) / 100;
 	settings.look.lashes = obs_data_get_bool(data, SETTING_LASHES);
+	settings.look.lash_length_scale = float(obs_data_get_int(data, SETTING_LASH_LENGTH)) / 100;
+	settings.look.lash_thickness_scale = float(obs_data_get_int(data, SETTING_LASH_THICKNESS)) / 100;
 	// OBS stores colors as 0xAABBGGRR.
 	uint32_t color = uint32_t(obs_data_get_int(data, SETTING_COLOR));
 	float opacity = float(obs_data_get_int(data, SETTING_OPACITY)) / 100;
@@ -476,6 +480,18 @@ void filter_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, SETTING_WING_ANGLE, 22.0);
 	obs_data_set_default_double(settings, SETTING_SOFTNESS, 1.2);
 	obs_data_set_default_bool(settings, SETTING_LASHES, true);
+	// Percent of the standard lash; scenes saved before these existed get the standard lash.
+	obs_data_set_default_int(settings, SETTING_LASH_LENGTH, 100);
+	obs_data_set_default_int(settings, SETTING_LASH_THICKNESS, 100);
+}
+
+// The lash sliders do nothing with lashes off, so they're greyed out then.
+bool lashes_modified(obs_properties_t *properties, obs_property_t *, obs_data_t *settings)
+{
+	bool lashes = obs_data_get_bool(settings, SETTING_LASHES);
+	obs_property_set_enabled(obs_properties_get(properties, SETTING_LASH_LENGTH), lashes);
+	obs_property_set_enabled(obs_properties_get(properties, SETTING_LASH_THICKNESS), lashes);
+	return true; // redraw the properties
 }
 
 obs_properties_t *filter_properties(void *)
@@ -487,7 +503,10 @@ obs_properties_t *filter_properties(void *)
 	obs_properties_add_float_slider(properties, SETTING_WING_LENGTH, obs_module_text("WingLength"), 0.0, 60.0, 1.0);
 	obs_properties_add_float_slider(properties, SETTING_WING_ANGLE, obs_module_text("WingAngle"), 0.0, 45.0, 1.0);
 	obs_properties_add_float_slider(properties, SETTING_SOFTNESS, obs_module_text("Softness"), 0.0, 5.0, 0.1);
-	obs_properties_add_bool(properties, SETTING_LASHES, obs_module_text("Lashes"));
+	obs_property_t *lashes = obs_properties_add_bool(properties, SETTING_LASHES, obs_module_text("Lashes"));
+	obs_property_set_modified_callback(lashes, lashes_modified);
+	obs_properties_add_int_slider(properties, SETTING_LASH_LENGTH, obs_module_text("LashLength"), 50, 200, 5);
+	obs_properties_add_int_slider(properties, SETTING_LASH_THICKNESS, obs_module_text("LashThickness"), 50, 200, 5);
 	return properties;
 }
 

@@ -87,6 +87,7 @@ asks you to allow its system extension in **System Settings → Privacy & Securi
 | Wing length / angle | The flick past the outer corner. Length 0 means no wing. |
 | Edge softness | How soft the edges are. |
 | Lashes | A few thin lashes on the outer half of each lid. |
+| Lash length / thickness | Lash size, from 50% to 200% of the standard lash. Greyed out with lashes off. |
 
 Sizes are relative to your eyes, so the look stays the same as you lean in or out.
 

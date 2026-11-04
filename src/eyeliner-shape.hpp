@@ -19,6 +19,10 @@ struct Look {
 	float wing_lift_degrees = 22.0f;
 	float softness = 0.012f;
 	bool lashes = true;
+	// Multipliers on the standard lash's length and on its thickness: 1 is the standard lash,
+	// 0.5 half its size, 2 double. Scaling the two together keeps the lashes' shape.
+	float lash_length_scale = 1.0f;
+	float lash_thickness_scale = 1.0f;
 };
 
 struct Vertex {

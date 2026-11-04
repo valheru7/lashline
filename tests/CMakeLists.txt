@@ -1,5 +1,6 @@
 # Standalone checks for the parts of the plugin that don't need OBS.
 #   cmake -S tests -B build-tests -DONNXRUNTIME_DIR=<extracted onnxruntime release> && cmake --build build-tests
+#   ctest --test-dir build-tests
 cmake_minimum_required(VERSION 3.28)
 project(eyeliner-tests CXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -21,3 +22,9 @@ add_executable(
 )
 target_include_directories(render-video PRIVATE ../src "${ONNXRUNTIME_DIR}/include")
 target_link_libraries(render-video PRIVATE ${CMAKE_DL_LIBS})
+
+# Checks of the liner shape on a made-up face; needs no models.
+enable_testing()
+add_executable(shape-test shape-test.cpp ../src/eyeliner-shape.cpp)
+target_include_directories(shape-test PRIVATE ../src "${ONNXRUNTIME_DIR}/include")
+add_test(NAME shape COMMAND shape-test)

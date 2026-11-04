@@ -29,8 +29,8 @@ double seconds_now()
 
 Look look_from(const LashlineLook &look)
 {
-	return {look.inner_thickness,   look.outer_thickness, look.wing_length,
-		look.wing_lift_degrees, look.softness,        look.lashes};
+	return {look.inner_thickness, look.outer_thickness, look.wing_length,       look.wing_lift_degrees,
+		look.softness,        look.lashes,          look.lash_length_scale, look.lash_thickness_scale};
 }
 
 } // namespace
@@ -38,8 +38,8 @@ Look look_from(const LashlineLook &look)
 LashlineLook lashline_default_look(void)
 {
 	Look look;
-	return {look.inner_thickness,   look.outer_thickness, look.wing_length,
-		look.wing_lift_degrees, look.softness,        look.lashes};
+	return {look.inner_thickness, look.outer_thickness, look.wing_length,       look.wing_lift_degrees,
+		look.softness,        look.lashes,          look.lash_length_scale, look.lash_thickness_scale};
 }
 
 LashlineTracker *lashline_tracker_create(const char *detector_model_path, const char *landmark_model_path, char *error,

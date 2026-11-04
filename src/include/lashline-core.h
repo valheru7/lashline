@@ -29,6 +29,8 @@ typedef struct {
 	float wing_lift_degrees;
 	float softness;
 	bool lashes;
+	float lash_length_scale; // 1 is the standard lash
+	float lash_thickness_scale;
 } LashlineLook;
 
 typedef struct {
