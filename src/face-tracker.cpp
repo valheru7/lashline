@@ -15,9 +15,14 @@ constexpr int LANDMARK_SIZE = 256;
 constexpr int DETECTOR_ANCHOR_COUNT = 896;
 constexpr int DETECTOR_VALUES_PER_ANCHOR = 16; // box (4) + 6 keypoints (12)
 constexpr float MIN_DETECTION_SCORE = 0.5f;
+// In the frame turned a quarter or half turn, the detector also finds things that aren't faces
+// at all (around 0.5 to 0.75 in testing, where real faces scored 0.85 and up), so there it has
+// to be surer.
+constexpr float MIN_TURNED_DETECTION_SCORE = 0.8f;
 constexpr float MIN_FACE_PRESENCE = 0.5f;
 // The region fed to the landmark model is this much larger than the face.
 constexpr float ROI_SCALE = 1.5f;
+constexpr float QUARTER_TURN = 1.5707963f; // radians
 // While following fewer faces than asked for, look for new ones this often (in frames).
 constexpr int REDETECT_INTERVAL = 10;
 // Detector keypoints 0 and 1 are the eyes; mesh points 33 and 263 are the outer eye corners.
@@ -231,6 +236,19 @@ void snap_upper_lids(FaceMesh &points, const ImageView &image)
 	}
 }
 
+// The transform from image pixels to the detector's input: the frame letterboxed into the
+// square, keeping its aspect ratio, and turned `quarter_turns` quarter turns about its center.
+Affine image_to_detector(const ImageView &image, int quarter_turns)
+{
+	float scale = float(DETECTOR_SIZE) / std::max(image.width, image.height);
+	float angle = quarter_turns * QUARTER_TURN;
+	// Rounded, so a turn moves pixels exactly onto pixels.
+	float cos = std::round(std::cos(angle)) * scale, sin = std::round(std::sin(angle)) * scale;
+	// The frame's center goes to the square's center.
+	float half = DETECTOR_SIZE / 2.0f, middle_x = image.width / 2.0f, middle_y = image.height / 2.0f;
+	return {cos, -sin, half - cos * middle_x + sin * middle_y, sin, cos, half - sin * middle_x - cos * middle_y};
+}
+
 // The transform from crop pixels to image pixels.
 Affine region_to_image(const Region &region, int crop_size)
 {
@@ -370,16 +388,36 @@ FaceMesh FaceTracker::FollowedFace::smooth(const FaceMesh &points, float face_si
 	return smoothed;
 }
 
+// The detector was trained on faces that are roughly upright. A face lying on its side or upside
+// down it often misses, or finds with its eyes swapped: then the landmark model, which only
+// knows upright faces, fits an upright face onto the upside-down one (its upper lids on the
+// lower lids, and the liner with them), and following the face from its own points keeps it
+// that way. So the detector looks at the frame turned each quarter turn too, and each face
+// takes its most confident finding, which comes from the turn that shows it closest to upright.
 std::vector<Region> FaceTracker::detect(const ImageView &image)
+{
+	std::vector<Detection> found;
+	for (int quarter_turns = 0; quarter_turns < 4; quarter_turns++) {
+		std::vector<Detection> turned = detect_turned(image, quarter_turns);
+		found.insert(found.end(), turned.begin(), turned.end());
+	}
+
+	// Neighboring anchors, and the same face in other turns, fire on the same face, so take the
+	// most confident first and skip later ones on a face already taken.
+	std::sort(found.begin(), found.end(), [](const Detection &a, const Detection &b) { return a.score > b.score; });
+	std::vector<Region> faces;
+	for (const Detection &detection : found)
+		if (!same_face_as_any(detection.region, faces))
+			faces.push_back(detection.region);
+	return faces;
+}
+
+std::vector<FaceTracker::Detection> FaceTracker::detect_turned(const ImageView &image, int quarter_turns)
 {
 	static const std::vector<Point> anchors = detector_anchors();
 
-	// Letterbox the frame into a square, keeping its aspect ratio.
-	float scale = float(DETECTOR_SIZE) / std::max(image.width, image.height);
-	float pad_x = (DETECTOR_SIZE - image.width * scale) / 2;
-	float pad_y = (DETECTOR_SIZE - image.height * scale) / 2;
-	Affine to_square{scale, 0, pad_x, 0, scale, pad_y};
-	sample_into(image, to_square.inverse(), DETECTOR_SIZE, -1.0f, 1.0f, detector_input);
+	Affine to_image = image_to_detector(image, quarter_turns).inverse();
+	sample_into(image, to_image, DETECTOR_SIZE, -1.0f, 1.0f, detector_input);
 
 	const char *input_names[] = {"input"};
 	const char *output_names[] = {"regressors", "classificators"};
@@ -388,32 +426,28 @@ std::vector<Region> FaceTracker::detect(const ImageView &image)
 	const float *regressors = outputs[0].GetTensorData<float>();
 	const float *scores = outputs[1].GetTensorData<float>();
 
-	// Neighboring anchors fire on the same face, so take the most confident first and skip
-	// later ones on a face already taken.
-	std::vector<int> confident;
-	for (int i = 0; i < DETECTOR_ANCHOR_COUNT; i++)
-		if (sigmoid(scores[i]) >= MIN_DETECTION_SCORE)
-			confident.push_back(i);
-	std::sort(confident.begin(), confident.end(), [&](int a, int b) { return scores[a] > scores[b]; });
-
-	std::vector<Region> faces;
-	for (int index : confident) {
+	// Pixels in the square are the frame's pixels scaled by this much.
+	float scale = float(DETECTOR_SIZE) / std::max(image.width, image.height);
+	float min_score = quarter_turns == 0 ? MIN_DETECTION_SCORE : MIN_TURNED_DETECTION_SCORE;
+	std::vector<Detection> found;
+	for (int index = 0; index < DETECTOR_ANCHOR_COUNT; index++) {
+		float score = sigmoid(scores[index]);
+		if (score < min_score)
+			continue;
 		const float *raw = regressors + index * DETECTOR_VALUES_PER_ANCHOR;
 		Point anchor = anchors[index];
-		// Detector output is in 128-pixel units relative to the anchor; undo the letterbox.
-		auto to_image = [&](float x, float y) {
-			Point square{x + anchor.x * DETECTOR_SIZE, y + anchor.y * DETECTOR_SIZE};
-			return Point{(square.x - pad_x) / scale, (square.y - pad_y) / scale};
+		// Detector output is in 128-pixel units relative to the anchor; undo the letterbox and
+		// the turn.
+		auto in_image = [&](float x, float y) {
+			return to_image.apply({x + anchor.x * DETECTOR_SIZE, y + anchor.y * DETECTOR_SIZE});
 		};
-		Point center = to_image(raw[0], raw[1]);
+		Point center = in_image(raw[0], raw[1]);
 		float box_size = std::max(raw[2], raw[3]) / scale;
-		Point right_eye = to_image(raw[4 + 2 * DETECTOR_RIGHT_EYE], raw[5 + 2 * DETECTOR_RIGHT_EYE]);
-		Point left_eye = to_image(raw[4 + 2 * DETECTOR_LEFT_EYE], raw[5 + 2 * DETECTOR_LEFT_EYE]);
-		Region face{center, box_size * ROI_SCALE, eye_rotation(right_eye, left_eye)};
-		if (!same_face_as_any(face, faces))
-			faces.push_back(face);
+		Point right_eye = in_image(raw[4 + 2 * DETECTOR_RIGHT_EYE], raw[5 + 2 * DETECTOR_RIGHT_EYE]);
+		Point left_eye = in_image(raw[4 + 2 * DETECTOR_LEFT_EYE], raw[5 + 2 * DETECTOR_LEFT_EYE]);
+		found.push_back({{center, box_size * ROI_SCALE, eye_rotation(right_eye, left_eye)}, score});
 	}
-	return faces;
+	return found;
 }
 
 std::optional<FaceMesh> FaceTracker::landmarks(const ImageView &image, const Region &face)

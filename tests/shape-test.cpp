@@ -127,11 +127,48 @@ void lash_size_scales_the_lashes()
 	      "half the length and thickness covers a quarter of the area");
 }
 
+// `point` turned by `degrees` about `center`.
+Point turned(Point point, Point center, float degrees)
+{
+	float angle = degrees * 3.14159265f / 180, cos = std::cos(angle), sin = std::sin(angle);
+	float x = point.x - center.x, y = point.y - center.y;
+	return {center.x + x * cos - y * sin, center.y + x * sin + y * cos};
+}
+
+// The liner goes by the face's own directions, never the image's: a face lying on its side or
+// upside down in the frame gets the same liner, turned with it.
+void a_turned_face_gets_the_same_liner_turned()
+{
+	const FaceMesh face = straight_on_face();
+	const Look look;
+	const std::vector<Vertex> upright = eyeliner_triangles(face, look);
+	const Point center{10000, 5000};
+	for (float degrees : {45.0f, 90.0f, 135.0f, 180.0f, 225.0f, 270.0f}) {
+		FaceMesh turned_face;
+		for (size_t i = 0; i < face.size(); i++)
+			turned_face[i] = turned(face[i], center, degrees);
+		const std::vector<Vertex> triangles = eyeliner_triangles(turned_face, look);
+
+		bool same = triangles.size() == upright.size();
+		for (size_t i = 0; same && i < triangles.size(); i++) {
+			Point expected = turned(upright[i].position, center, degrees);
+			Point position = triangles[i].position;
+			float miss = std::hypot(position.x - expected.x, position.y - expected.y);
+			// Half a pixel on an eye 4000 pixels wide: only float rounding.
+			same = miss < 0.5f && std::abs(triangles[i].alpha - upright[i].alpha) < 1e-3f;
+		}
+		char what[80];
+		std::snprintf(what, sizeof(what), "a face turned %.0f degrees gets the same liner, turned", degrees);
+		check(same, what);
+	}
+}
+
 } // namespace
 
 int main()
 {
 	lash_size_scales_the_lashes();
+	a_turned_face_gets_the_same_liner_turned();
 	if (failures == 0)
 		std::printf("All shape checks passed.\n");
 	return failures == 0 ? 0 : 1;

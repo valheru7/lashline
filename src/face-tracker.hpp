@@ -6,7 +6,8 @@
 //
 // 1. When there's no face yet, the detector (128x128) finds one in the whole frame.
 // 2. The face's region is cut out, rotated upright using the eyes, and fed to the landmark
-//    model (256x256).
+//    model (256x256). The detector only knows faces that are roughly upright, so it also
+//    looks at the frame turned each quarter turn, for faces on their side or upside down.
 // 3. On the next frame the region comes from those points, so the detector only runs again
 //    when the face is lost.
 //
@@ -20,8 +21,8 @@
 //
 // track_all() follows several faces the same way, one region each, and also runs the
 // detector every few frames while it has room for more, to pick up someone stepping in.
-// (The Python prototype only does one face, and doesn't snap or smooth: compare it with both
-// off.)
+// (The Python prototype only does one face, doesn't snap or smooth, and only looks for faces
+// in the frame as it is: compare it with snapping and smoothing off, on upright faces.)
 
 #include "one-euro-filter.hpp"
 #include "onnx-runtime.hpp"
@@ -106,8 +107,17 @@ private:
 		FaceMesh smooth(const FaceMesh &points, float face_size, double time);
 	};
 
+	struct Detection {
+		Region region;
+		float score; // the detector's confidence, 0 to 1
+	};
+
 	// Every face the detector finds, most confident first.
 	std::vector<Region> detect(const ImageView &image);
+	// Every confident finding of the detector in the frame turned by `quarter_turns` quarter
+	// turns, as regions of the frame as it is. A face can be found by several neighboring
+	// anchors.
+	std::vector<Detection> detect_turned(const ImageView &image, int quarter_turns);
 	std::optional<FaceMesh> landmarks(const ImageView &image, const Region &region);
 
 	Ort::Env env;
