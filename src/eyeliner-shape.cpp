@@ -71,6 +71,27 @@ constexpr float WING_OPEN_FADE_END = 0.06f;
 constexpr float LINER_OPEN_FADE_START = 0.08f;
 constexpr float LINER_OPEN_FADE_END = 0.03f;
 
+// The lower lids, inner corner to outer corner. With the upper lids, they outline the part of
+// each eye that shows, which is all of the iris that gets tinted.
+constexpr std::array<int, 9> RIGHT_LOWER_LID{133, 155, 154, 153, 145, 144, 163, 7, 33};
+constexpr std::array<int, 9> LEFT_LOWER_LID{362, 382, 381, 380, 374, 373, 390, 249, 263};
+// Each iris's center, then four points on its edge going round: toward the image's right, its
+// top, its left and its bottom (checked on real footage).
+constexpr std::array<int, 5> RIGHT_IRIS{468, 469, 470, 471, 472};
+constexpr std::array<int, 5> LEFT_IRIS{473, 474, 475, 476, 477};
+// The iris mesh is a fan of rays from the iris's center, each cut off where it meets a lid.
+constexpr int IRIS_RAYS = 64;
+// The tint fades in over this much of an eye's width inside the lid line, so it never paints
+// the lid itself where the tracked lid is a little off.
+constexpr float IRIS_LID_SOFTNESS = 0.03f;
+// The glow reaches out to this many iris radii, and past the lid line by this much of an eye's
+// width: a glowing eye lights the lid's edge a little, but not the whole lid.
+constexpr float GLOW_RADIUS = 1.8f;
+constexpr float GLOW_PAST_LID = 0.1f;
+// The iris fades out as its center comes within this many iris radii of a lid. An open eye
+// looking ahead has its center well over half a radius from either lid.
+constexpr float CENTER_LID_FADE_START = 0.25f;
+
 Point operator+(Point a, Point b)
 {
 	return {a.x + b.x, a.y + b.y};
@@ -86,6 +107,10 @@ Point operator*(Point a, float s)
 float dot(Point a, Point b)
 {
 	return a.x * b.x + a.y * b.y;
+}
+float cross(Point a, Point b)
+{
+	return a.x * b.y - a.y * b.x;
 }
 float length(Point a)
 {
@@ -350,6 +375,160 @@ private:
 	std::array<Point, NOSE_MIDLINE.size()> points; // (position across, height) of each midline point
 };
 
+// How much of each eye's drawing should show this frame, from where the eye sits in the face.
+struct EyeVisibility {
+	float width_ratio;      // this eye's width over the wider eye's: under 1 for the far eye in a turn
+	float corner_clearance; // how far the inner corner is clear of the nose, in eye widths
+	float openness;         // the gap between the lids, in eye widths
+};
+
+EyeVisibility eye_visibility(const FaceMesh &face, const LidCurve &lid, bool left_eye, float widest,
+			     const NoseLine &nose)
+{
+	EyeVisibility eye;
+	eye.width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
+	eye.corner_clearance = widest > 0 ? nose.clearance(lid.points.front(), left_eye) / widest : 1.0f;
+	// Measured toward the forehead, so an upper lid snapped to just below the lower one
+	// (see face-tracker.cpp) reads as closed, not as opening again.
+	Point lid_gap =
+		face[left_eye ? LEFT_LID_TOP : RIGHT_LID_TOP] - face[left_eye ? LEFT_LID_BOTTOM : RIGHT_LID_BOTTOM];
+	eye.openness = lid.eye_width > 0 ? std::max(0.0f, dot(lid_gap, lid.axis_up)) / lid.eye_width : 0.0f;
+	return eye;
+}
+
+// Once the nose closes in on an eye's inner corner, its mesh points are guesses, and a closing
+// lid's are too; the liner fades out then.
+float liner_opacity(const EyeVisibility &eye)
+{
+	return fade(eye.width_ratio, LINER_FADE_START, LINER_FADE_END) *
+	       fade(eye.corner_clearance, LINER_CORNER_FADE_START, LINER_CORNER_FADE_END) *
+	       fade(eye.openness, LINER_OPEN_FADE_START, LINER_OPEN_FADE_END);
+}
+
+// The part of the eye that shows: the smoothed upper lid from the inner to the outer corner,
+// then the smoothed lower lid back.
+std::vector<Point> eye_opening(const FaceMesh &face, const LidCurve &upper, const std::array<int, 9> &lower_indices)
+{
+	std::vector<Point> lower;
+	for (int index : lower_indices)
+		lower.push_back(face[index]);
+	const std::vector<Point> lower_curve = catmull_rom(lower);
+
+	std::vector<Point> outline = upper.points;
+	// The two lids share the corners, so the way back leaves them out.
+	for (size_t i = lower_curve.size() - 1; i-- > 1;)
+		outline.push_back(lower_curve[i]);
+	return outline;
+}
+
+bool inside(const std::vector<Point> &outline, Point point)
+{
+	bool inside = false;
+	for (size_t i = 0, j = outline.size() - 1; i < outline.size(); j = i++) {
+		Point a = outline[i], b = outline[j];
+		if ((a.y > point.y) != (b.y > point.y) && point.x < a.x + (b.x - a.x) * (point.y - a.y) / (b.y - a.y))
+			inside = !inside;
+	}
+	return inside;
+}
+
+// How far from `origin` along `direction` the outline is first crossed, in multiples of
+// `direction`'s length; infinity if it never is.
+float distance_to_outline(const std::vector<Point> &outline, Point origin, Point direction)
+{
+	float nearest = INFINITY;
+	for (size_t i = 0; i < outline.size(); i++) {
+		Point a = outline[i], edge = outline[(i + 1) % outline.size()] - a;
+		float denominator = cross(direction, edge);
+		if (std::abs(denominator) < 1e-9f)
+			continue; // parallel
+		Point to_a = a - origin;
+		float along_ray = cross(to_a, edge) / denominator;
+		float along_edge = cross(to_a, direction) / denominator;
+		if (along_ray > 0 && along_edge >= 0 && along_edge <= 1)
+			nearest = std::min(nearest, along_ray);
+	}
+	return nearest;
+}
+
+// Adds one iris as a fan of rays from its center. The tracked iris is a circle seen at an angle,
+// so it's an ellipse: its center plus `across` and `down` (half its width and half its height,
+// as vectors) times the cosine and sine of the angle round it. Each ray stops at the lid, where
+// the tint has faded out, or (with glow) a little past it. Distances along a ray are in iris
+// radii, which makes each vertex's `iris` coordinates simply the ray's direction times its
+// distance.
+void add_iris(const FaceMesh &face, const std::array<int, 5> &indices, const std::vector<Point> &opening,
+	      float eye_width, float tint, float glow, std::vector<IrisVertex> &out)
+{
+	const Point center = face[indices[0]];
+	const Point across = (face[indices[1]] - face[indices[3]]) * 0.5f;
+	const Point down = (face[indices[2]] - face[indices[4]]) * 0.5f;
+	// An iris under a pixel across has nothing to tint, and a closed eye can leave the tracked
+	// iris's center outside the opening.
+	if (std::abs(cross(across, down)) < 0.25f || !inside(opening, center))
+		return;
+
+	constexpr int SAMPLES = 5; // along each ray: center, three knees where the fades bend, end
+	struct Ray {
+		std::array<IrisVertex, SAMPLES> vertices;
+		std::array<float, SAMPLES> distances;
+	};
+	// When the center nears the lid line (looking far up or down), the iris fades out over the
+	// last stretch instead of vanishing in one frame once the center crosses it.
+	float nearest_lid = INFINITY;
+	std::array<float, IRIS_RAYS> lids;
+	std::array<Point, IRIS_RAYS> units;
+	for (int k = 0; k < IRIS_RAYS; k++) {
+		const float angle = 2 * PI * k / IRIS_RAYS;
+		units[k] = {std::cos(angle), std::sin(angle)};
+		lids[k] = distance_to_outline(opening, center, across * units[k].x + down * units[k].y);
+		nearest_lid = std::min(nearest_lid, lids[k]);
+	}
+	const float center_fade = fade(nearest_lid, CENTER_LID_FADE_START, 0.0f);
+	tint *= center_fade;
+	glow *= center_fade;
+	if (!(tint > 0 || glow > 0))
+		return;
+
+	std::array<Ray, IRIS_RAYS> rays;
+	for (int k = 0; k < IRIS_RAYS; k++) {
+		const Point unit = units[k];
+		const Point direction = across * unit.x + down * unit.y;       // one iris radius, in pixels
+		const float pixel = 1.0f / std::max(length(direction), 1e-3f); // one pixel, in iris radii
+		const float lid = lids[k];
+		const float soft = std::max(1.0f, IRIS_LID_SOFTNESS * eye_width) * pixel;
+		const float past = glow > 0 ? GLOW_PAST_LID * eye_width * pixel : 0.0f;
+		const float end = glow > 0 ? std::min(GLOW_RADIUS, lid + past) : std::min(1.0f, lid);
+
+		Ray &ray = rays[k];
+		const std::array<float, SAMPLES> knees{0.0f, lid - soft, lid, lid + past, end};
+		for (int i = 0; i < SAMPLES; i++) {
+			const float distance = std::clamp(knees[i], 0.0f, end);
+			ray.distances[i] = distance;
+			ray.vertices[i] = {center + direction * distance, unit * distance,
+					   tint * std::clamp((lid - distance) / soft, 0.0f, 1.0f),
+					   glow * std::clamp((lid + past - distance) / (soft + past), 0.0f, 1.0f)};
+		}
+	}
+
+	auto triangle = [&](const IrisVertex &a, const IrisVertex &b, const IrisVertex &c) {
+		out.push_back(a);
+		out.push_back(b);
+		out.push_back(c);
+	};
+	for (int k = 0; k < IRIS_RAYS; k++) {
+		const Ray &ray = rays[k], &next = rays[(k + 1) % IRIS_RAYS];
+		triangle(ray.vertices[0], ray.vertices[1], next.vertices[1]);
+		for (int i = 1; i + 1 < SAMPLES; i++) {
+			// Knees that land on the same spot leave nothing between them.
+			if (ray.distances[i] == ray.distances[i + 1] && next.distances[i] == next.distances[i + 1])
+				continue;
+			triangle(ray.vertices[i], next.vertices[i], next.vertices[i + 1]);
+			triangle(ray.vertices[i], next.vertices[i + 1], ray.vertices[i + 1]);
+		}
+	}
+}
+
 } // namespace
 
 std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
@@ -365,27 +544,15 @@ std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 		// At least a pixel of fringe, so edges are antialiased even with no softness.
 		float feather = std::max(1.0f, 2 * look.softness * lid.eye_width);
 
-		// Once the nose closes in on this eye's inner corner, its mesh points are guesses; the
-		// lashes, which stick out furthest, go first, then the liner.
-		float width_ratio = widest > 0 ? lid.eye_width / widest : 1.0f;
-		float corner_clearance = widest > 0 ? nose.clearance(lid.points.front(), left_eye) / widest : 1.0f;
-
-		// Measured toward the forehead, so an upper lid snapped to just below the lower one
-		// (see face-tracker.cpp) reads as closed, not as opening again.
-		Point lid_gap = face[left_eye ? LEFT_LID_TOP : RIGHT_LID_TOP] -
-				face[left_eye ? LEFT_LID_BOTTOM : RIGHT_LID_BOTTOM];
-		float openness = lid.eye_width > 0 ? std::max(0.0f, dot(lid_gap, lid.axis_up)) / lid.eye_width : 0.0f;
-
-		float liner_opacity = fade(width_ratio, LINER_FADE_START, LINER_FADE_END) *
-				      fade(corner_clearance, LINER_CORNER_FADE_START, LINER_CORNER_FADE_END) *
-				      fade(openness, LINER_OPEN_FADE_START, LINER_OPEN_FADE_END);
-		float wing_scale = fade(openness, WING_OPEN_FADE_START, WING_OPEN_FADE_END);
-		if (liner_opacity > 0)
+		// The lashes, which stick out furthest, fade first, then the liner.
+		const EyeVisibility eye = eye_visibility(face, lid, left_eye, widest, nose);
+		float wing_scale = fade(eye.openness, WING_OPEN_FADE_START, WING_OPEN_FADE_END);
+		if (float opacity = liner_opacity(eye); opacity > 0)
 			add_stroke(liner_sections(lid, look, wing_scale), feather,
-				   feather + LASH_SIDE_SOFTNESS * lid.eye_width, liner_opacity, triangles);
-		float lash_opacity = fade(width_ratio, LASH_FADE_START, LASH_FADE_END) *
-				     fade(corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END) *
-				     fade(openness, LASH_OPEN_FADE_START, LASH_OPEN_FADE_END);
+				   feather + LASH_SIDE_SOFTNESS * lid.eye_width, opacity, triangles);
+		float lash_opacity = fade(eye.width_ratio, LASH_FADE_START, LASH_FADE_END) *
+				     fade(eye.corner_clearance, LASH_CORNER_FADE_START, LASH_CORNER_FADE_END) *
+				     fade(eye.openness, LASH_OPEN_FADE_START, LASH_OPEN_FADE_END);
 		if (look.lashes && lash_opacity > 0)
 			for (const auto &lash : lash_strokes(lid, look))
 				add_stroke(lash, std::max(1.0f, feather * 0.5f), std::max(1.0f, feather * 0.5f),
@@ -395,6 +562,40 @@ std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 		float softness = NOSE_EDGE_SOFTNESS * widest;
 		for (size_t i = first_vertex; i < triangles.size(); i++)
 			triangles[i].alpha *= fade(nose.clearance(triangles[i].position, left_eye), softness, 0.0f);
+	}
+	return triangles;
+}
+
+std::vector<IrisVertex> iris_triangles(const FaceMesh &face, const Look &look)
+{
+	std::vector<IrisVertex> triangles;
+	if (!look.eye_color)
+		return triangles;
+
+	const std::array<LidCurve, 2> lids{lid_curve(face, RIGHT_UPPER_LID), lid_curve(face, LEFT_UPPER_LID)};
+	const float widest = std::max(lids[0].eye_width, lids[1].eye_width);
+	const NoseLine nose(face);
+	for (const LidCurve &lid : lids) {
+		const bool left_eye = &lid == &lids[1];
+		// The iris comes and goes with the liner: it fades on blinks, on the far eye in a turn,
+		// and as the nose closes in, for the same reasons.
+		const float visibility = liner_opacity(eye_visibility(face, lid, left_eye, widest, nose));
+		const float tint = std::clamp(look.eye_color_intensity, 0.0f, 1.0f) * visibility;
+		const float glow = std::clamp(look.eye_glow, 0.0f, 1.0f) * visibility;
+		if (!(tint > 0 || glow > 0)) // also skips NaN, as the liner's check does
+			continue;
+
+		const size_t first_vertex = triangles.size();
+		add_iris(face, left_eye ? LEFT_IRIS : RIGHT_IRIS,
+			 eye_opening(face, lid, left_eye ? LEFT_LOWER_LID : RIGHT_LOWER_LID), lid.eye_width, tint, glow,
+			 triangles);
+
+		const float softness = NOSE_EDGE_SOFTNESS * widest;
+		for (size_t i = first_vertex; i < triangles.size(); i++) {
+			const float clear = fade(nose.clearance(triangles[i].position, left_eye), softness, 0.0f);
+			triangles[i].tint *= clear;
+			triangles[i].glow *= clear;
+		}
 	}
 	return triangles;
 }

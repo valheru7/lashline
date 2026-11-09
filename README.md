@@ -88,6 +88,8 @@ asks you to allow its system extension in **System Settings → Privacy & Securi
 | Edge softness | How soft the edges are. |
 | Lashes | A few thin lashes on the outer half of each lid. |
 | Lash length / thickness | Lash size, from 50% to 200% of the standard lash. Greyed out with lashes off. |
+| Eye color | Colored contacts: tints each iris, keeping its own light and dark and leaving the pupil dark. Off by default. |
+| Iris color / intensity / glow | The tint's color and strength, and an optional soft glow over and around the iris. Greyed out with eye color off. |
 
 Sizes are relative to your eyes, so the look stays the same as you lean in or out.
 

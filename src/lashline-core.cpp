@@ -13,6 +13,7 @@ using namespace eyeliner;
 // The C structs are copied straight into the C++ ones, so their layouts must match.
 static_assert(sizeof(LashlinePoint) == sizeof(Point));
 static_assert(sizeof(LashlineVertex) == sizeof(Vertex));
+static_assert(sizeof(LashlineIrisVertex) == sizeof(IrisVertex));
 static_assert(LASHLINE_FACE_POINT_COUNT == FACE_MESH_POINT_COUNT);
 
 struct LashlineTracker {
@@ -29,8 +30,12 @@ double seconds_now()
 
 Look look_from(const LashlineLook &look)
 {
-	return {look.inner_thickness, look.outer_thickness, look.wing_length,       look.wing_lift_degrees,
-		look.softness,        look.lashes,          look.lash_length_scale, look.lash_thickness_scale};
+	return {look.inner_thickness,   look.outer_thickness,
+		look.wing_length,       look.wing_lift_degrees,
+		look.softness,          look.lashes,
+		look.lash_length_scale, look.lash_thickness_scale,
+		look.eye_color,         look.eye_color_intensity,
+		look.eye_glow};
 }
 
 } // namespace
@@ -38,8 +43,12 @@ Look look_from(const LashlineLook &look)
 LashlineLook lashline_default_look(void)
 {
 	Look look;
-	return {look.inner_thickness, look.outer_thickness, look.wing_length,       look.wing_lift_degrees,
-		look.softness,        look.lashes,          look.lash_length_scale, look.lash_thickness_scale};
+	return {look.inner_thickness,   look.outer_thickness,
+		look.wing_length,       look.wing_lift_degrees,
+		look.softness,          look.lashes,
+		look.lash_length_scale, look.lash_thickness_scale,
+		look.eye_color,         look.eye_color_intensity,
+		look.eye_glow};
 }
 
 LashlineTracker *lashline_tracker_create(const char *detector_model_path, const char *landmark_model_path, char *error,
@@ -103,5 +112,15 @@ size_t lashline_liner_triangles(const LashlinePoint *points, const LashlineLook 
 	std::copy_n(reinterpret_cast<const Point *>(points), face.size(), face.begin());
 	std::vector<Vertex> triangles = eyeliner_triangles(face, look_from(*look));
 	std::copy_n(triangles.begin(), std::min(capacity, triangles.size()), reinterpret_cast<Vertex *>(vertices));
+	return triangles.size();
+}
+
+size_t lashline_iris_triangles(const LashlinePoint *points, const LashlineLook *look, LashlineIrisVertex *vertices,
+			       size_t capacity)
+{
+	FaceMesh face;
+	std::copy_n(reinterpret_cast<const Point *>(points), face.size(), face.begin());
+	std::vector<IrisVertex> triangles = iris_triangles(face, look_from(*look));
+	std::copy_n(triangles.begin(), std::min(capacity, triangles.size()), reinterpret_cast<IrisVertex *>(vertices));
 	return triangles.size();
 }

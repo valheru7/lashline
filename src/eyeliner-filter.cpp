@@ -47,6 +47,8 @@ constexpr size_t MAX_QUEUED_FRAMES = 3;
 constexpr uint32_t MAX_CAPTURE_WIDTH = 960;
 // Both eyes with lashes come to about 3,200 vertices.
 constexpr uint32_t VERTEX_CAPACITY = 8192;
+// Both irises with glow come to about 2,700.
+constexpr uint32_t IRIS_VERTEX_CAPACITY = 4096;
 
 constexpr const char *SETTING_COLOR = "color";
 constexpr const char *SETTING_OPACITY = "opacity";
@@ -57,6 +59,10 @@ constexpr const char *SETTING_SOFTNESS = "softness";
 constexpr const char *SETTING_LASHES = "lashes";
 constexpr const char *SETTING_LASH_LENGTH = "lash_length";
 constexpr const char *SETTING_LASH_THICKNESS = "lash_thickness";
+constexpr const char *SETTING_EYE_COLOR = "eye_color";
+constexpr const char *SETTING_EYE_COLOR_TINT = "eye_color_tint";
+constexpr const char *SETTING_EYE_COLOR_INTENSITY = "eye_color_intensity";
+constexpr const char *SETTING_EYE_GLOW = "eye_glow";
 
 // The points of a face, with the size of the frame they were found in.
 struct TrackedFace {
@@ -195,8 +201,16 @@ private:
 
 struct Settings {
 	Look look;
-	vec4 color; // RGB from the color picker, A from the opacity slider
+	vec4 color;     // RGB from the color picker, A from the opacity slider
+	vec4 eye_color; // RGB from the eye color picker; A is unused
 };
+
+// OBS stores colors as 0xAABBGGRR.
+void set_color(vec4 *color, uint32_t value, float alpha)
+{
+	vec4_set(color, (value & 0xff) / 255.0f, ((value >> 8) & 0xff) / 255.0f, ((value >> 16) & 0xff) / 255.0f,
+		 alpha);
+}
 
 Settings read_settings(obs_data_t *data)
 {
@@ -208,11 +222,12 @@ Settings read_settings(obs_data_t *data)
 	settings.look.lashes = obs_data_get_bool(data, SETTING_LASHES);
 	settings.look.lash_length_scale = float(obs_data_get_int(data, SETTING_LASH_LENGTH)) / 100;
 	settings.look.lash_thickness_scale = float(obs_data_get_int(data, SETTING_LASH_THICKNESS)) / 100;
-	// OBS stores colors as 0xAABBGGRR.
-	uint32_t color = uint32_t(obs_data_get_int(data, SETTING_COLOR));
+	settings.look.eye_color = obs_data_get_bool(data, SETTING_EYE_COLOR);
+	settings.look.eye_color_intensity = float(obs_data_get_int(data, SETTING_EYE_COLOR_INTENSITY)) / 100;
+	settings.look.eye_glow = float(obs_data_get_int(data, SETTING_EYE_GLOW)) / 100;
 	float opacity = float(obs_data_get_int(data, SETTING_OPACITY)) / 100;
-	vec4_set(&settings.color, (color & 0xff) / 255.0f, ((color >> 8) & 0xff) / 255.0f,
-		 ((color >> 16) & 0xff) / 255.0f, opacity);
+	set_color(&settings.color, uint32_t(obs_data_get_int(data, SETTING_COLOR)), opacity);
+	set_color(&settings.eye_color, uint32_t(obs_data_get_int(data, SETTING_EYE_COLOR_TINT)), 1.0f);
 	return settings;
 }
 
@@ -225,7 +240,17 @@ struct FrameSlot {
 
 class EyelinerFilter {
 public:
-	EyelinerFilter(obs_source_t *context, obs_data_t *data) : context(context) { update(data); }
+	EyelinerFilter(obs_source_t *context, obs_data_t *data) : context(context)
+	{
+		update(data);
+		char *path = obs_module_file("effects/iris.effect");
+		obs_enter_graphics();
+		iris_effect = path ? gs_effect_create_from_file(path, nullptr) : nullptr;
+		obs_leave_graphics();
+		bfree(path);
+		if (!iris_effect)
+			obs_log(LOG_ERROR, "Couldn't load the eye color effect; reinstall the plugin");
+	}
 
 	~EyelinerFilter()
 	{
@@ -235,6 +260,8 @@ public:
 		gs_texrender_destroy(capture);
 		gs_stagesurface_destroy(stage);
 		gs_vertexbuffer_destroy(vertices);
+		gs_vertexbuffer_destroy(iris_vertices);
+		gs_effect_destroy(iris_effect);
 		obs_leave_graphics();
 	}
 
@@ -273,8 +300,25 @@ public:
 
 		draw_texture(texture, width, height);
 		TrackingResult result = tracker.result_for(shown->frame_id);
-		if (result.face)
-			draw_liner(*result.face, width, height);
+		if (!result.face)
+			return;
+
+		Settings current;
+		{
+			std::lock_guard lock(settings_mutex);
+			current = settings;
+		}
+		// The tracker saw a downscaled frame; bring its points up to the source's size.
+		FaceMesh points = result.face->points;
+		float scale_x = float(width) / result.face->frame_width;
+		float scale_y = float(height) / result.face->frame_height;
+		for (Point &point : points) {
+			point.x *= scale_x;
+			point.y *= scale_y;
+		}
+		// The irises first, so the liner draws over any glow on the lid.
+		draw_irises(points, current, texture, width, height);
+		draw_liner(points, current);
 	}
 
 private:
@@ -372,21 +416,61 @@ private:
 		gs_enable_framebuffer_srgb(previous_srgb);
 	}
 
-	void draw_liner(TrackedFace face, uint32_t width, uint32_t height)
+	// The colored contacts: tints each iris, reading the colors from `frame` (the texture just
+	// drawn), then screens the glow over it. See data/effects/iris.effect.
+	void draw_irises(const FaceMesh &points, const Settings &current, gs_texture_t *frame, uint32_t width,
+			 uint32_t height)
 	{
-		Settings current;
-		{
-			std::lock_guard lock(settings_mutex);
-			current = settings;
+		if (!iris_effect)
+			return;
+		std::vector<IrisVertex> triangles = iris_triangles(points, current.look);
+		uint32_t count = std::min(uint32_t(triangles.size()), IRIS_VERTEX_CAPACITY) / 3 * 3;
+		if (count == 0)
+			return;
+
+		if (!iris_vertices)
+			iris_vertices = create_iris_vertex_buffer();
+		gs_vb_data *data = gs_vertexbuffer_get_data(iris_vertices);
+		vec2 *iris = static_cast<vec2 *>(data->tvarray[0].array);
+		vec2 *strength = static_cast<vec2 *>(data->tvarray[1].array);
+		for (uint32_t i = 0; i < count; i++) {
+			vec3_set(&data->points[i], triangles[i].position.x, triangles[i].position.y, 0);
+			vec2_set(&iris[i], triangles[i].iris.x, triangles[i].iris.y);
+			vec2_set(&strength[i], triangles[i].tint, triangles[i].glow);
+		}
+		gs_vertexbuffer_flush(iris_vertices);
+
+		vec2 size;
+		vec2_set(&size, float(width), float(height));
+		// Read as stored (gamma space), like the liner's blending.
+		gs_effect_set_texture(gs_effect_get_param_by_name(iris_effect, "image"), frame);
+		gs_effect_set_vec2(gs_effect_get_param_by_name(iris_effect, "image_size"), &size);
+		gs_effect_set_vec4(gs_effect_get_param_by_name(iris_effect, "iris_color"), &current.eye_color);
+
+		const bool previous_srgb = gs_framebuffer_srgb_enabled();
+		gs_enable_framebuffer_srgb(false);
+		gs_blend_state_push();
+		gs_enable_blending(true);
+		gs_load_vertexbuffer(iris_vertices);
+		gs_load_indexbuffer(nullptr);
+
+		gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA, GS_BLEND_ZERO, GS_BLEND_ONE);
+		while (gs_effect_loop(iris_effect, "Tint"))
+			gs_draw(GS_TRIS, 0, count);
+		if (current.look.eye_glow > 0) {
+			// Screen: the light is added, scaled down by how bright the frame already is.
+			gs_blend_function_separate(GS_BLEND_ONE, GS_BLEND_INVSRCCOLOR, GS_BLEND_ZERO, GS_BLEND_ONE);
+			while (gs_effect_loop(iris_effect, "Glow"))
+				gs_draw(GS_TRIS, 0, count);
 		}
 
-		// The tracker saw a downscaled frame; bring its points up to the source's size.
-		float scale_x = float(width) / face.frame_width, scale_y = float(height) / face.frame_height;
-		for (Point &point : face.points) {
-			point.x *= scale_x;
-			point.y *= scale_y;
-		}
-		std::vector<Vertex> triangles = eyeliner_triangles(face.points, current.look);
+		gs_blend_state_pop();
+		gs_enable_framebuffer_srgb(previous_srgb);
+	}
+
+	void draw_liner(const FaceMesh &points, const Settings &current)
+	{
+		std::vector<Vertex> triangles = eyeliner_triangles(points, current.look);
 		uint32_t count = std::min(uint32_t(triangles.size()), VERTEX_CAPACITY) / 3 * 3;
 		if (count == 0)
 			return;
@@ -421,6 +505,21 @@ private:
 		gs_enable_framebuffer_srgb(previous_srgb);
 	}
 
+	// Each vertex has its position, its place in the iris and its tint and glow strengths.
+	static gs_vertbuffer_t *create_iris_vertex_buffer()
+	{
+		gs_vb_data *data = gs_vbdata_create();
+		data->num = IRIS_VERTEX_CAPACITY;
+		data->points = static_cast<vec3 *>(bzalloc(sizeof(vec3) * IRIS_VERTEX_CAPACITY));
+		data->num_tex = 2;
+		data->tvarray = static_cast<gs_tvertarray *>(bzalloc(sizeof(gs_tvertarray) * 2));
+		for (size_t i = 0; i < data->num_tex; i++) {
+			data->tvarray[i].width = 2;
+			data->tvarray[i].array = bzalloc(sizeof(vec2) * IRIS_VERTEX_CAPACITY);
+		}
+		return gs_vertexbuffer_create(data, GS_DYNAMIC);
+	}
+
 	static gs_vertbuffer_t *create_vertex_buffer()
 	{
 		gs_vb_data *data = gs_vbdata_create();
@@ -444,6 +543,8 @@ private:
 	uint64_t stage_frame_id = 0; // the frame waiting in `stage`, or 0
 	uint64_t stage_video_time = 0;
 	gs_vertbuffer_t *vertices = nullptr;
+	gs_vertbuffer_t *iris_vertices = nullptr;
+	gs_effect_t *iris_effect = nullptr;
 };
 
 const char *filter_name(void *)
@@ -483,6 +584,11 @@ void filter_defaults(obs_data_t *settings)
 	// Percent of the standard lash; scenes saved before these existed get the standard lash.
 	obs_data_set_default_int(settings, SETTING_LASH_LENGTH, 100);
 	obs_data_set_default_int(settings, SETTING_LASH_THICKNESS, 100);
+	// Colored contacts are off unless asked for. The color is a clear blue (0xAABBGGRR).
+	obs_data_set_default_bool(settings, SETTING_EYE_COLOR, false);
+	obs_data_set_default_int(settings, SETTING_EYE_COLOR_TINT, 0xffd9904a);
+	obs_data_set_default_int(settings, SETTING_EYE_COLOR_INTENSITY, 70);
+	obs_data_set_default_int(settings, SETTING_EYE_GLOW, 0);
 }
 
 // The lash sliders do nothing with lashes off, so they're greyed out then.
@@ -491,6 +597,15 @@ bool lashes_modified(obs_properties_t *properties, obs_property_t *, obs_data_t 
 	bool lashes = obs_data_get_bool(settings, SETTING_LASHES);
 	obs_property_set_enabled(obs_properties_get(properties, SETTING_LASH_LENGTH), lashes);
 	obs_property_set_enabled(obs_properties_get(properties, SETTING_LASH_THICKNESS), lashes);
+	return true; // redraw the properties
+}
+
+// Likewise the eye color's settings with eye color off.
+bool eye_color_modified(obs_properties_t *properties, obs_property_t *, obs_data_t *settings)
+{
+	bool eye_color = obs_data_get_bool(settings, SETTING_EYE_COLOR);
+	for (const char *name : {SETTING_EYE_COLOR_TINT, SETTING_EYE_COLOR_INTENSITY, SETTING_EYE_GLOW})
+		obs_property_set_enabled(obs_properties_get(properties, name), eye_color);
 	return true; // redraw the properties
 }
 
@@ -507,6 +622,12 @@ obs_properties_t *filter_properties(void *)
 	obs_property_set_modified_callback(lashes, lashes_modified);
 	obs_properties_add_int_slider(properties, SETTING_LASH_LENGTH, obs_module_text("LashLength"), 50, 200, 5);
 	obs_properties_add_int_slider(properties, SETTING_LASH_THICKNESS, obs_module_text("LashThickness"), 50, 200, 5);
+	obs_property_t *eye_color = obs_properties_add_bool(properties, SETTING_EYE_COLOR, obs_module_text("EyeColor"));
+	obs_property_set_modified_callback(eye_color, eye_color_modified);
+	obs_properties_add_color(properties, SETTING_EYE_COLOR_TINT, obs_module_text("EyeColorTint"));
+	obs_properties_add_int_slider(properties, SETTING_EYE_COLOR_INTENSITY, obs_module_text("EyeColorIntensity"), 0,
+				      100, 1);
+	obs_properties_add_int_slider(properties, SETTING_EYE_GLOW, obs_module_text("EyeGlow"), 0, 100, 1);
 	return properties;
 }
 

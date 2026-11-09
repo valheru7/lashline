@@ -1,0 +1,105 @@
+// The colored contacts (eyeliner-filter.cpp). Draws iris_triangles() from eyeliner-shape.hpp
+// twice: "Tint" recolors the iris while keeping its own light and dark, blended over the frame
+// by alpha, and "Glow" gives the light to screen over it. See IrisVertex in eyeliner-shape.hpp;
+// any other host's shader and tests/render-video.cpp do the same math, so keep them in step.
+// Colors are in gamma space, the way the liner blends.
+
+uniform float4x4 ViewProj;
+uniform texture2d image;   // the frame, as drawn underneath
+uniform float2 image_size; // in pixels
+uniform float4 iris_color; // rgb; a is unused
+
+sampler_state frame_sampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct IrisIn {
+	float4 pos : POSITION;
+	float2 iris : TEXCOORD0;     // relative to the iris: its edge is 1 away from its center
+	float2 strength : TEXCOORD1; // tint, glow
+};
+
+struct IrisOut {
+	float4 pos : POSITION;
+	float2 iris : TEXCOORD0;
+	float2 strength : TEXCOORD1;
+	float2 frame_uv : TEXCOORD2;
+};
+
+IrisOut VSIris(IrisIn vert_in)
+{
+	IrisOut vert_out;
+	vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+	vert_out.iris = vert_in.iris;
+	vert_out.strength = vert_in.strength;
+	vert_out.frame_uv = vert_in.pos.xy / image_size;
+	return vert_out;
+}
+
+float luminance(float3 color)
+{
+	return dot(color, float3(0.3, 0.59, 0.11));
+}
+
+// `color` at luminance `light`, keeping its hue, and its saturation as far as it fits.
+float3 with_luminance(float3 color, float light)
+{
+	float3 c = color + float3(light - luminance(color), light - luminance(color), light - luminance(color));
+	float l = luminance(c);
+	float lowest = min(min(c.r, c.g), c.b);
+	float highest = max(max(c.r, c.g), c.b);
+	float3 grey = float3(l, l, l);
+	if (lowest < 0.0)
+		c = grey + (c - grey) * (l / (l - lowest));
+	if (highest > 1.0)
+		c = grey + (c - grey) * ((1.0 - l) / (highest - l));
+	return c;
+}
+
+// The pupil stays dark, and the iris's outer edge is soft.
+float iris_ring(float r)
+{
+	return smoothstep(0.28, 0.45, r) * (1.0 - smoothstep(0.85, 1.0, r));
+}
+
+float glow_falloff(float r)
+{
+	return 1.0 - smoothstep(0.6, 1.8, r);
+}
+
+float4 PSTint(IrisOut vert_in) : TARGET
+{
+	float3 frame = image.Sample(frame_sampler, vert_in.frame_uv).rgb;
+	// The iris's own light and dark, lifted toward the new color's lightness (colored contacts
+	// over dark eyes read lighter), but never darkened, so catchlights stay.
+	float light = luminance(frame);
+	float3 tinted = with_luminance(iris_color.rgb, max(light, light + (luminance(iris_color.rgb) - light) * 0.25));
+	return float4(tinted, vert_in.strength.x * iris_ring(length(vert_in.iris)));
+}
+
+// Premultiplied light, for a screen blend (ONE, INVSRCCOLOR): it lightens, never past white.
+float4 PSGlow(IrisOut vert_in) : TARGET
+{
+	float strength = vert_in.strength.y * glow_falloff(length(vert_in.iris));
+	return float4(iris_color.rgb * strength, 0.0);
+}
+
+technique Tint
+{
+	pass
+	{
+		vertex_shader = VSIris(vert_in);
+		pixel_shader  = PSTint(vert_in);
+	}
+}
+
+technique Glow
+{
+	pass
+	{
+		vertex_shader = VSIris(vert_in);
+		pixel_shader  = PSGlow(vert_in);
+	}
+}

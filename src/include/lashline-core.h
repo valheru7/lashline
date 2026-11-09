@@ -31,12 +31,24 @@ typedef struct {
 	bool lashes;
 	float lash_length_scale; // 1 is the standard lash
 	float lash_thickness_scale;
+	bool eye_color;            // colored contacts; the color itself is the renderer's
+	float eye_color_intensity; // 0 to 1
+	float eye_glow;            // 0 (none) to 1
 } LashlineLook;
 
 typedef struct {
 	LashlinePoint position;
 	float alpha; // 1 inside the liner, fading to 0 at its soft edge
 } LashlineVertex;
+
+// A point of the colored-contacts mesh. See IrisVertex in eyeliner-shape.hpp for how the
+// renderer turns these into a color per pixel.
+typedef struct {
+	LashlinePoint position;
+	LashlinePoint iris; // relative to the iris: its center is (0, 0) and its edge is 1 away
+	float tint;         // 0 to 1
+	float glow;         // 0 to 1
+} LashlineIrisVertex;
 
 LashlineLook lashline_default_look(void);
 
@@ -76,6 +88,11 @@ void lashline_tracker_set_smoothing(LashlineTracker *tracker, bool enabled);
 // `capacity` were written; call again with a bigger buffer.
 size_t lashline_liner_triangles(const LashlinePoint *points, const LashlineLook *look, LashlineVertex *vertices,
 				size_t capacity);
+
+// The same for the colored contacts: triangles covering each iris where it shows between the
+// lids. None when `look->eye_color` is off.
+size_t lashline_iris_triangles(const LashlinePoint *points, const LashlineLook *look, LashlineIrisVertex *vertices,
+			       size_t capacity);
 
 #ifdef __cplusplus
 }
