@@ -19,7 +19,34 @@ constexpr int CHIN = 152;
 
 constexpr int CURVE_SAMPLES_PER_SEGMENT = 8;
 constexpr int WING_SAMPLES = 6;
-constexpr int LASH_COUNT = 7;
+// Lashes, as fractions of the eye's width where they're sizes. Roots run along the lid from
+// LASH_START to LASH_END (0 is the inner corner, 1 the outer).
+constexpr int LASH_COUNT = 22;
+constexpr int LASH_SAMPLES = 5;
+constexpr float LASH_START = 0.2f;
+constexpr float LASH_END = 0.98f;
+constexpr float LASH_HALF_WIDTH = 0.0065f;
+// Every LASH_BOLD_EVERY-th lash is bolder and a little longer, for definition among the fine ones.
+constexpr int LASH_BOLD_EVERY = 3;
+constexpr float LASH_BOLD_WIDTH = 1.7f;
+constexpr float LASH_BOLD_LENGTH = 1.06f;
+constexpr float LASH_SHORT_LAYER = 0.78f; // every other lash's length
+constexpr float LASH_TIP_FADE = 0.85f;    // how much of the lash's opacity is gone at its tip
+// Small, fixed differences between neighbouring lashes, so they don't look stamped out.
+struct LashVariation {
+	float length;        // times the lash's length
+	float sweep_degrees; // added to its angle
+	float curl;          // added to how far it bends, in radians
+};
+constexpr std::array<LashVariation, 7> LASH_VARIATIONS{{
+	{1.00f, 0.0f, 0.00f},
+	{0.92f, 4.0f, 0.08f},
+	{1.06f, -3.0f, -0.05f},
+	{0.95f, 2.0f, 0.04f},
+	{1.03f, -5.0f, 0.10f},
+	{0.90f, 3.0f, -0.08f},
+	{1.08f, -1.5f, 0.03f},
+}};
 // The tracked lid line can be off by a few percent of the eye's width (the landmark model sees
 // each eye only about 35 pixels across), which showed as a strip of skin between the liner and
 // the lashes. Snapping to the lash line (face-tracker.cpp) closes most of that, but not where
@@ -311,31 +338,51 @@ std::vector<Section> liner_sections(const LidCurve &lid, const Look &look, float
 	return sections;
 }
 
-// A few thin, tapered lashes on the outer half of the lid, fanning out toward the corner.
+// Many fine lashes from near the inner corner to the outer corner, short on the inside and
+// fanning out longer toward the corner. Seven evenly spaced, identical, solid-tipped lashes read
+// as a strip lash, so each lash here tapers and fades toward its tip and varies a little from
+// its neighbours. All-fine lashes read as too thin, though, so they're a mix: a bolder lash every
+// few, with finer ones between, the fine ones alternating long and short so they layer.
 std::vector<std::vector<Section>> lash_strokes(const LidCurve &lid, const Look &look)
 {
 	std::vector<std::vector<Section>> lashes;
 	for (int i = 0; i < LASH_COUNT; i++) {
-		float t = 0.4f + 0.58f * i / (LASH_COUNT - 1);
-		float progress = (t - 0.4f) / 0.58f;
-		size_t index = size_t(std::round(t * (lid.points.size() - 1)));
+		float progress = float(i) / (LASH_COUNT - 1);
+		float t = LASH_START + (LASH_END - LASH_START) * progress;
+		// Each lash's own fixed variation, so nothing changes from frame to frame.
+		const LashVariation &variation = LASH_VARIATIONS[i % LASH_VARIATIONS.size()];
+		// The lid's points are spaced along it, so a root between two points is placed between them.
+		float position = t * (lid.points.size() - 1);
+		size_t index = std::min(size_t(position), lid.points.size() - 2);
+		Point root = lerp(lid.points[index], lid.points[index + 1], position - index);
 		// Directions come from the eye's line, not the lid's local curve, which turns down
 		// into the outer corner and would point the outer lashes down with it.
-		Point root = lid.points[index], up = lid.axis_up, along = lid.axis;
+		Point up = lid.axis_up, along = lid.axis;
 		// Lashes near the middle point up; toward the outer corner they sweep outward.
-		float sweep = (10 + 40 * progress) * PI / 180;
-		float lash_length = (0.13f + 0.07f * progress) * look.lash_length_scale * lid.eye_width;
-		float half_width = 0.012f * look.lash_thickness_scale * lid.eye_width;
-		// A slight curl: the tip bends further outward than the base.
-		Point base_direction = turn(up, along, sweep);
-		Point tip_direction = turn(up, along, sweep + 0.35f);
-		Point middle = root + base_direction * (lash_length * 0.55f);
-		Point tip = middle + tip_direction * (lash_length * 0.45f);
-		lashes.push_back({
-			{root - along * half_width, root + along * half_width},
-			{middle - along * (half_width * 0.5f), middle + along * (half_width * 0.5f)},
-			{tip, tip},
-		});
+		float sweep = (5 + 45 * progress + variation.sweep_degrees) * PI / 180;
+		bool bold = i % LASH_BOLD_EVERY == 0;
+		float layer = bold ? LASH_BOLD_LENGTH : (i % 2 == 0 ? 1.0f : LASH_SHORT_LAYER);
+		float lash_length = (0.08f + 0.12f * std::pow(progress, 0.8f)) * layer * variation.length *
+				    look.lash_length_scale * lid.eye_width;
+		float half_width =
+			LASH_HALF_WIDTH * (bold ? LASH_BOLD_WIDTH : 1.0f) * look.lash_thickness_scale * lid.eye_width;
+		float curl = 0.35f + variation.curl;
+
+		// Along a gentle curve: the lash bends further outward toward its tip, narrows to a
+		// point and fades, so its tip wisps out instead of ending dark.
+		std::vector<Section> sections;
+		Point point = root;
+		for (int s = 0; s <= LASH_SAMPLES; s++) {
+			float u = float(s) / LASH_SAMPLES;
+			if (s > 0) {
+				Point direction = turn(up, along, sweep + curl * u);
+				point = point + direction * (lash_length / LASH_SAMPLES);
+			}
+			float width = half_width * std::pow(1 - u, 0.8f);
+			float alpha = 1 - LASH_TIP_FADE * u * u;
+			sections.push_back({point - along * width, point + along * width, alpha});
+		}
+		lashes.push_back(std::move(sections));
 	}
 	return lashes;
 }
@@ -555,7 +602,10 @@ std::vector<Vertex> eyeliner_triangles(const FaceMesh &face, const Look &look)
 				     fade(eye.openness, LASH_OPEN_FADE_START, LASH_OPEN_FADE_END);
 		if (look.lashes && lash_opacity > 0)
 			for (const auto &lash : lash_strokes(lid, look))
-				add_stroke(lash, std::max(1.0f, feather * 0.5f), std::max(1.0f, feather * 0.5f),
+				// A lash only a pixel or two wide with a hard edge shimmers as it moves across
+				// pixels and shows every bit of the tracker's wobble, so lashes keep a soft fringe
+				// of at least a pixel and a half.
+				add_stroke(lash, std::max(1.5f, feather * 0.5f), std::max(1.5f, feather * 0.5f),
 					   lash_opacity, triangles);
 
 		// And whatever still lands over the nose is hidden, with a soft edge.
