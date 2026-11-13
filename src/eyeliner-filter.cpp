@@ -7,11 +7,12 @@
 //
 //   1. Each new frame is copied into a small ring of textures, and a downscaled copy is read
 //      back (one frame later, so the GPU is never waited on) and handed to the tracker thread.
-//   2. What OBS shows is the frame from DISPLAY_DELAY frames ago, with the liner drawn from
-//      that same frame's face points.
+//   2. What OBS shows is the frame from DISPLAY_DELAY frames ago (a frame or two more on a
+//      computer where tracking falls behind), with the liner drawn from that same frame's face
+//      points.
 //
-// The video runs DISPLAY_DELAY frames late, the way OBS's own Render Delay filter delays it,
-// and OBS's render thread never waits on the GPU or on the tracker.
+// The video runs those frames late, the way OBS's own Render Delay filter delays it, and OBS's
+// render thread never waits on the GPU or on the tracker.
 
 #include "eyeliner-shape.hpp"
 #include "face-tracker.hpp"
@@ -34,8 +35,16 @@ namespace {
 // Frames between capturing a frame and showing it. The face points are read back one frame
 // after capture and tracked in a few milliseconds, so they're ready by the frame after that.
 constexpr uint64_t DISPLAY_DELAY = 2;
+// On a slower computer the points aren't always ready in time, and a frame drawn with the
+// frame before's points sits a frame behind the face. When that happens on every other frame,
+// the liner flips between two places and jitters even on a still face (seen on a Mac with eye
+// color on, which adds GPU work). So when more than LATE_LIMIT of the last LATE_WINDOW frames
+// were drawn with older points, the video is held back one more frame, up to MAX_DISPLAY_DELAY.
+constexpr uint64_t MAX_DISPLAY_DELAY = 4;
+constexpr int LATE_WINDOW = 60;
+constexpr int LATE_LIMIT = 6;
 // Frames kept: the ones waiting to be shown, plus the one being captured.
-constexpr size_t FRAME_SLOTS = DISPLAY_DELAY + 2;
+constexpr size_t FRAME_SLOTS = MAX_DISPLAY_DELAY + 2;
 // Results kept, so a slightly late lookup still finds its frame.
 constexpr size_t RESULT_HISTORY = 8;
 // Frames the tracker may have queued; it normally keeps up, and this caps memory if it can't.
@@ -45,8 +54,8 @@ constexpr size_t MAX_QUEUED_FRAMES = 3;
 // The tracker sees the frame at most this wide. A face filling a third of a 1080p webcam
 // frame is still ~200 pixels across, plenty for the 256x256 landmark model.
 constexpr uint32_t MAX_CAPTURE_WIDTH = 960;
-// Both eyes with lashes come to about 3,200 vertices.
-constexpr uint32_t VERTEX_CAPACITY = 8192;
+// Both eyes with lashes come to about 7,600 vertices (OBS draws one face); room to spare.
+constexpr uint32_t VERTEX_CAPACITY = 12288;
 // Both irises with glow come to about 2,700.
 constexpr uint32_t IRIS_VERTEX_CAPACITY = 4096;
 
@@ -283,12 +292,13 @@ public:
 
 		// OBS can render a source more than once per frame (preview, projectors); capture once.
 		uint64_t video_time = obs_get_video_frame_time();
-		if (video_time != last_video_time) {
+		const bool new_frame = video_time != last_video_time;
+		if (new_frame) {
 			last_video_time = video_time;
 			capture_frame(target, width, height, video_time);
 		}
 
-		uint64_t shown_id = latest_frame_id > DISPLAY_DELAY ? latest_frame_id - DISPLAY_DELAY : 1;
+		uint64_t shown_id = latest_frame_id > display_delay ? latest_frame_id - display_delay : 1;
 		const FrameSlot *shown = &slots[shown_id % FRAME_SLOTS];
 		if (shown->frame_id != shown_id) // just started: nothing that old yet
 			shown = &slots[latest_frame_id % FRAME_SLOTS];
@@ -300,6 +310,8 @@ public:
 
 		draw_texture(texture, width, height);
 		TrackingResult result = tracker.result_for(shown->frame_id);
+		if (new_frame)
+			keep_up_with_tracker(shown->frame_id, result.frame_id);
 		if (!result.face)
 			return;
 
@@ -322,6 +334,31 @@ public:
 	}
 
 private:
+	// Counts the frames drawn with an older frame's points (see LATE_LIMIT) and holds the video
+	// back one more frame when there are too many.
+	void keep_up_with_tracker(uint64_t shown_id, uint64_t tracked_id)
+	{
+		// Before the first result there's nothing to be late with.
+		if (tracked_id == 0)
+			return;
+		if (tracked_id != shown_id)
+			late_frames++;
+		if (++frames_counted < LATE_WINDOW)
+			return;
+
+		// The models' first runs are slow and frames queued meanwhile are dropped, so the first
+		// window after tracking starts says nothing about keeping up and is left out.
+		if (late_frames > LATE_LIMIT && display_delay < MAX_DISPLAY_DELAY && !first_window) {
+			display_delay++;
+			obs_log(LOG_INFO,
+				"Face tracking was late on %d of the last %d frames; now showing video %d frames late",
+				late_frames, LATE_WINDOW, int(display_delay));
+		}
+		first_window = false;
+		frames_counted = 0;
+		late_frames = 0;
+	}
+
 	// Copies the frame beneath this filter into the next slot and starts the tracker's copy.
 	void capture_frame(obs_source_t *target, uint32_t width, uint32_t height, uint64_t video_time)
 	{
@@ -538,6 +575,10 @@ private:
 	std::array<FrameSlot, FRAME_SLOTS> slots;
 	uint64_t latest_frame_id = 0;
 	uint64_t last_video_time = 0;
+	uint64_t display_delay = DISPLAY_DELAY;
+	int frames_counted = 0; // in the current LATE_WINDOW
+	int late_frames = 0;
+	bool first_window = true;
 	gs_texrender_t *capture = nullptr;
 	gs_stagesurf_t *stage = nullptr;
 	uint64_t stage_frame_id = 0; // the frame waiting in `stage`, or 0
